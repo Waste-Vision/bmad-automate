@@ -3,7 +3,7 @@ BMAD Workflow Automation CLI.
 
 Automates the BMAD (Business Method for Agile Development) workflow cycle
 for stories defined in sprint-status.yaml. For each actionable story, the
-script orchestrates a full development cycle:
+script orchestrates a full development cycle using GitHub Copilot CLI:
 
     create-story -> dev-story -> code-review -> git-commit-push
 
@@ -19,8 +19,8 @@ Features:
 
 Requirements:
     - Python 3.11+
-    - Claude CLI installed and configured
-    - BMAD workflows available (bmad:bmm:workflows:*)
+    - GitHub Copilot CLI installed (gh extension install github/gh-copilot)
+    - A BMAD project with _bmad/ workflow files
 
 Usage:
     bmad-automate [options] [story_keys...]
@@ -58,7 +58,20 @@ DEFAULT_SPRINT_STATUS = "_bmad-output/implementation-artifacts/sprint-status.yam
 DEFAULT_STORY_DIR = "_bmad-output/implementation-artifacts"
 DEFAULT_LOG_FILE = "bmad-automation.log"
 DEFAULT_RETRIES = 1
-DEFAULT_TIMEOUT = 600  # 10 minutes
+DEFAULT_TIMEOUT = 3600  # 60 minutes
+DEFAULT_BMAD_DIR = "_bmad"  # Default BMAD directory in project root
+
+# GitHub Copilot CLI command for non-interactive autonomous execution
+AI_COMMAND = "gh copilot --yolo -p"
+
+# Workflow paths relative to the BMAD directory
+WORKFLOW_ENGINE = "core/tasks/workflow.xml"
+WORKFLOW_CREATE = "bmm/workflows/4-implementation/create-story/workflow.yaml"
+WORKFLOW_DEV = "bmm/workflows/4-implementation/dev-story/workflow.yaml"
+WORKFLOW_REVIEW = "bmm/workflows/4-implementation/code-review/workflow.yaml"
+WORKFLOW_RETRO = "bmm/workflows/4-implementation/retrospective/workflow.yaml"
+WORKFLOW_COURSE_CORRECT = "bmm/workflows/4-implementation/correct-course/workflow.yaml"
+WORKFLOW_QUICK_DEV = "bmm/workflows/bmad-quick-flow/quick-dev/workflow.md"
 
 # Rich console for output
 console = Console()
@@ -163,10 +176,16 @@ class Config:
     skip_dev: bool = False
     skip_review: bool = False
     skip_commit: bool = False
+    skip_retro: bool = False
+    skip_course_correct: bool = False
+    skip_retro_impl: bool = False
 
     # Retry/Timeout
     retries: int = DEFAULT_RETRIES
     timeout: int = DEFAULT_TIMEOUT
+
+    # BMAD directory
+    bmad_dir: Path = Path(DEFAULT_BMAD_DIR)
 
 
 # Typer app instance
@@ -250,7 +269,7 @@ def log_to_file(message: str, config: Config) -> None:
     The log format is: [YYYY-MM-DD HH:MM:SS] message
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(config.log_file, "a") as f:
+    with open(config.log_file, "a", encoding="utf-8") as f:
         f.write(f"[{timestamp}] {message}\n")
 
 
@@ -259,15 +278,16 @@ def get_actionable_stories(config: Config) -> dict[str, list[str]]:
     Parse sprint-status.yaml and return stories grouped by actionable status.
 
     Reads the sprint-status.yaml file and extracts story keys that have
-    one of the actionable statuses: 'in-progress', 'ready-for-dev', or 'backlog'.
-    Story keys must match the pattern: digit-digit-kebab-case (e.g., '3-3-account').
+    one of the actionable statuses: 'review', 'in-progress', 'ready-for-dev',
+    or 'backlog'. Story keys must match the pattern: digit-digit-kebab-case
+    (e.g., '3-3-account').
 
     Args:
         config: Configuration containing the sprint_status file path.
 
     Returns:
         Dictionary with status names as keys and lists of story keys as values.
-        Keys: 'in-progress', 'ready-for-dev', 'backlog'
+        Keys: 'review', 'in-progress', 'ready-for-dev', 'backlog'
 
     Raises:
         SystemExit: If sprint-status.yaml doesn't exist or has invalid format.
@@ -278,7 +298,7 @@ def get_actionable_stories(config: Config) -> dict[str, list[str]]:
         )
         sys.exit(2)
 
-    with open(config.sprint_status) as f:
+    with open(config.sprint_status, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if not data or "development_status" not in data:
@@ -291,7 +311,7 @@ def get_actionable_stories(config: Config) -> dict[str, list[str]]:
     story_pattern = re.compile(r"^\d+-\d+-.+$")
 
     # Actionable statuses in priority order
-    actionable_statuses = ["in-progress", "ready-for-dev", "backlog"]
+    actionable_statuses = ["review", "in-progress", "ready-for-dev", "backlog"]
     stories_by_status: dict[str, list[str]] = {s: [] for s in actionable_statuses}
 
     for key, status in dev_status.items():
@@ -319,7 +339,7 @@ def get_all_story_keys(config: Config) -> set[str]:
     if not config.sprint_status.exists():
         return set()
 
-    with open(config.sprint_status) as f:
+    with open(config.sprint_status, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if not data or "development_status" not in data:
@@ -368,9 +388,11 @@ def filter_stories(
             valid_stories = [s for s in valid_stories if s.startswith(epic_prefix)]
         return valid_stories
 
-    # Build ordered list: in-progress first, then ready-for-dev, then backlog
+    # Build ordered list: review first (resume interrupted reviews),
+    # then in-progress, ready-for-dev, backlog
     stories = (
-        stories_by_status.get("in-progress", [])
+        stories_by_status.get("review", [])
+        + stories_by_status.get("in-progress", [])
         + stories_by_status.get("ready-for-dev", [])
         + stories_by_status.get("backlog", [])
     )
@@ -425,7 +447,7 @@ def run_step(
     """
     Execute a single workflow step with retry and timeout handling.
 
-    Runs a shell command (typically a Claude CLI invocation) and handles:
+    Runs a shell command (the configured AI CLI invocation) and handles:
     - Dry-run mode (just prints what would run)
     - Retries on failure (configurable via config.retries)
     - Timeout enforcement (configurable via config.timeout)
@@ -480,13 +502,24 @@ def run_step(
                 capture_output=not config.verbose,
                 text=True,
                 timeout=config.timeout,
+                encoding="utf-8",
+                errors="replace",
             )
+
+            # Filter out known copilot CLI noise from stderr
+            stderr = result.stderr or ""
+            stderr = "\n".join(
+                line
+                for line in stderr.splitlines()
+                if "unknown option '--no-warnings'" not in line
+                and "Try 'copilot --help'" not in line
+            ).strip()
 
             # Log output
             if result.stdout:
                 log_to_file(f"STDOUT:\n{result.stdout}", config)
-            if result.stderr:
-                log_to_file(f"STDERR:\n{result.stderr}", config)
+            if stderr:
+                log_to_file(f"STDERR:\n{stderr}", config)
 
             if result.returncode == 0:
                 duration = time.time() - start_time
@@ -497,7 +530,7 @@ def run_step(
                     name=step_name, status=StepStatus.SUCCESS, duration=duration
                 )
             else:
-                error = result.stderr or f"Exit code: {result.returncode}"
+                error = stderr or f"Exit code: {result.returncode}"
                 log_to_file(f"FAILED: {step_name} - {error}", config)
 
                 if attempt < config.retries:
@@ -540,7 +573,9 @@ def run_step(
     )
 
 
-def process_story(story_key: str, config: Config) -> StoryResult:
+def process_story(
+    story_key: str, config: Config, story_status: str = ""
+) -> StoryResult:
     """
     Process all workflow steps for a single story.
 
@@ -550,11 +585,16 @@ def process_story(story_key: str, config: Config) -> StoryResult:
     3. code-review: Review implementation and auto-fix issues
     4. git-commit: Commit and push changes
 
-    Each step can be skipped via config flags. Execution stops on first failure.
+    Steps are auto-skipped based on story status:
+    - in-review: skips create-story and dev-story (only review + commit)
+    - in-progress: skips create-story if story file exists
+
+    Each step can also be skipped via config flags. Execution stops on first failure.
 
     Args:
         story_key: Story identifier (e.g., '3-3-account-translation').
         config: Configuration with step skip flags and other settings.
+        story_status: Current status from sprint-status.yaml (e.g., 'in-review').
 
     Returns:
         StoryResult with overall status and individual step results.
@@ -568,59 +608,79 @@ def process_story(story_key: str, config: Config) -> StoryResult:
 
     log_to_file(f"=== Starting story: {story_key} ===", config)
 
-    # Define step prompts (broken up for readability)
+    # GitHub Copilot CLI command prefix
+    ai = AI_COMMAND
+    bmad = config.bmad_dir
+
+    # Build plain-English prompts that reference the BMAD workflow files
+    # The AI reads the workflow engine + specific workflow instructions
+    create_prompt = (
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_CREATE}. "
+        f"Create story: {story_key}. "
+        "Do not ask clarifying questions - use best judgment. "
+        "Process the entire workflow automatically (YOLO mode)."
+    )
     dev_prompt = (
-        f"/bmad:bmm:workflows:dev-story - Work on story file: {story_path}. "
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_DEV}. "
+        f"Work on story file: {story_path}. "
         "Complete all tasks. Run tests after each implementation. "
         "Do not ask clarifying questions - use best judgment based on "
-        "existing patterns."
+        "existing patterns. Continue until ALL tasks are complete (YOLO mode)."
     )
     review_prompt = (
-        f"/bmad:bmm:workflows:code-review - Review story: {story_path}. "
-        "IMPORTANT: When presenting options, always choose option 1 to "
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_REVIEW}. "
+        f"Review story: {story_path}. "
+        "When presenting options, always choose option 1 to "
         "auto-fix all issues immediately. Do not wait for user input."
     )
     commit_prompt = (
         f"Commit all changes for story {story_key} with a descriptive "
-        "message. Then push to the current branch."
+        "message. Then push to the current branch. Do not forget submodules"
     )
 
-    # Auto-skip create-story if story file already exists
+    # Auto-skip steps based on story status
     skip_create = config.skip_create
-    if not skip_create and story_path.exists():
+    skip_dev = config.skip_dev
+
+    if story_status == "review":
+        # Story already developed — only needs code-review + commit
+        if not config.quiet:
+            console.print(
+                "  [dim]Status is 'review', skipping create-story "
+                "and dev-story[/dim]"
+            )
+        skip_create = True
+        skip_dev = True
+    elif not skip_create and story_path.exists():
+        # Auto-skip create-story if story file already exists
         if not config.quiet:
             console.print("  [dim]Story file exists, skipping create-story[/dim]")
         skip_create = True
 
-    # Define steps
-    # Note: --dangerously-skip-permissions is required for non-interactive automation
-    # since Claude would otherwise wait for permission approvals that never come
-    # Build create-story command
-    create_cmd = (
-        "claude --dangerously-skip-permissions -p "
-        f'"/bmad:bmm:workflows:create-story - Create story: {story_key}"'
-    )
-
+    # Define steps – each invokes GitHub Copilot CLI
     step_definitions = [
         (
             "create-story",
             skip_create,
-            create_cmd,
+            f'{ai} "{create_prompt}"',
         ),
         (
             "dev-story",
-            config.skip_dev,
-            f'claude --dangerously-skip-permissions -p "{dev_prompt}"',
+            skip_dev,
+            f'{ai} "{dev_prompt}"',
         ),
         (
             "code-review",
             config.skip_review,
-            f'claude --dangerously-skip-permissions -p "{review_prompt}"',
+            f'{ai} "{review_prompt}"',
         ),
         (
             "git-commit",
             config.skip_commit,
-            f'claude --dangerously-skip-permissions -p "{commit_prompt}"',
+            f'{ai} "{commit_prompt}"',
         ),
     ]
 
@@ -666,6 +726,176 @@ def process_story(story_key: str, config: Config) -> StoryResult:
         duration=duration,
         failed_step=failed_step,
     )
+
+
+def get_epics_needing_retro(config: Config) -> list[int]:
+    """
+    Re-read sprint-status.yaml and find epics where all stories are done
+    but the retrospective has not been completed yet.
+
+    An epic needs a retrospective when:
+    - All its stories (digit-digit-kebab pattern) have status 'done'
+    - Its retrospective entry (epic-N-retrospective) is 'optional' (not 'done')
+
+    Args:
+        config: Configuration containing the sprint_status file path.
+
+    Returns:
+        Sorted list of epic numbers that need retrospectives.
+    """
+    if not config.sprint_status.exists():
+        return []
+
+    with open(config.sprint_status, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not data or "development_status" not in data:
+        return []
+
+    dev_status = data["development_status"]
+    story_pattern = re.compile(r"^(\d+)-\d+-.+$")
+
+    # Group stories by epic number
+    stories_by_epic: dict[int, list[str]] = {}
+    for key, status in dev_status.items():
+        m = story_pattern.match(key)
+        if m:
+            epic_num = int(m.group(1))
+            stories_by_epic.setdefault(epic_num, []).append(status)
+
+    epics_needing_retro: list[int] = []
+    for epic_num, statuses in sorted(stories_by_epic.items()):
+        # All stories must be 'done'
+        if not all(s == "done" for s in statuses):
+            continue
+        # Retrospective must not already be done
+        retro_key = f"epic-{epic_num}-retrospective"
+        retro_status = dev_status.get(retro_key, "")
+        if retro_status != "done":
+            epics_needing_retro.append(epic_num)
+
+    return epics_needing_retro
+
+
+def run_retrospective(epic_num: int, config: Config) -> StepResult:
+    """
+    Run the BMAD retrospective workflow for a completed epic.
+
+    Args:
+        epic_num: The epic number to run the retrospective for.
+        config: Configuration with timeout, retries, and output settings.
+
+    Returns:
+        StepResult with status and duration.
+    """
+    ai = AI_COMMAND
+    bmad = config.bmad_dir
+
+    retro_prompt = (
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_RETRO}. "
+        f"Run the retrospective for Epic {epic_num}. "
+        "Do not ask clarifying questions - use best judgment. "
+        "Process the entire workflow automatically (YOLO mode)."
+    )
+
+    command = f'{ai} "{retro_prompt}"'
+    step_name = f"retro-epic-{epic_num}"
+
+    if config.dry_run:
+        console.print(
+            f"  [dim][DRY-RUN][/dim] Would run: "
+            f"[magenta]{step_name}[/magenta]"
+        )
+        console.print(f"  [dim]Command: {command}[/dim]")
+        return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
+
+    return run_step(step_name, command, f"epic-{epic_num}", config)
+
+
+def run_course_correction(epic_num: int, config: Config) -> StepResult:
+    """
+    Run the scrum-master course-correction workflow for a completed epic.
+
+    After the retrospective, the scrum master reviews whether the project
+    needs a course correction and executes it if needed.
+
+    Args:
+        epic_num: The epic number to evaluate for course correction.
+        config: Configuration with timeout, retries, and output settings.
+
+    Returns:
+        StepResult with status and duration.
+    """
+    ai = AI_COMMAND
+    bmad = config.bmad_dir
+
+    cc_prompt = (
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_COURSE_CORRECT}. "
+        f"Evaluate whether a course correction is needed after Epic {epic_num}. "
+        "Review the retrospective output and current sprint status. "
+        "If a course correction is needed, execute it. "
+        "If no correction is needed, document that decision. "
+        "Do not ask clarifying questions - use best judgment. "
+        "Process the entire workflow automatically (YOLO mode)."
+    )
+
+    command = f'{ai} "{cc_prompt}"'
+    step_name = f"course-correct-epic-{epic_num}"
+
+    if config.dry_run:
+        console.print(
+            f"  [dim][DRY-RUN][/dim] Would run: "
+            f"[magenta]{step_name}[/magenta]"
+        )
+        console.print(f"  [dim]Command: {command}[/dim]")
+        return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
+
+    return run_step(step_name, command, f"epic-{epic_num}", config)
+
+
+def run_retro_implementation(epic_num: int, config: Config) -> StepResult:
+    """
+    Run a quick dev pass to implement learnings from the retrospective.
+
+    After the retrospective and course correction, this step applies any
+    concrete improvements identified during the retro (e.g., refactoring,
+    tooling changes, test coverage gaps) where relevant to the codebase.
+
+    Args:
+        epic_num: The epic number whose retro learnings to implement.
+        config: Configuration with timeout, retries, and output settings.
+
+    Returns:
+        StepResult with status and duration.
+    """
+    ai = AI_COMMAND
+    bmad = config.bmad_dir
+
+    impl_prompt = (
+        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_QUICK_DEV}. "
+        f"Implement the learnings from the Epic {epic_num} retrospective. "
+        "Review the retrospective output and apply any relevant improvements "
+        "to the codebase — refactoring, tooling, test coverage, documentation, "
+        "or process improvements. Skip anything that is not applicable. "
+        "Do not ask clarifying questions - use best judgment. "
+        "Process the entire workflow automatically (YOLO mode)."
+    )
+
+    command = f'{ai} "{impl_prompt}"'
+    step_name = f"retro-impl-epic-{epic_num}"
+
+    if config.dry_run:
+        console.print(
+            f"  [dim][DRY-RUN][/dim] Would run: "
+            f"[magenta]{step_name}[/magenta]"
+        )
+        console.print(f"  [dim]Command: {command}[/dim]")
+        return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
+
+    return run_step(step_name, command, f"epic-{epic_num}", config)
 
 
 def print_story_summary(result: StoryResult, config: Config) -> None:
@@ -962,6 +1192,27 @@ def main(
         bool,
         typer.Option("--skip-commit", help="Skip git commit/push step"),
     ] = False,
+    skip_retro: Annotated[
+        bool,
+        typer.Option(
+            "--skip-retro",
+            help="Skip automatic retrospective after completing an epic",
+        ),
+    ] = False,
+    skip_course_correct: Annotated[
+        bool,
+        typer.Option(
+            "--skip-course-correct",
+            help="Skip scrum-master course correction after epic retrospective",
+        ),
+    ] = False,
+    skip_retro_impl: Annotated[
+        bool,
+        typer.Option(
+            "--skip-retro-impl",
+            help="Skip implementing retrospective learnings after course correction",
+        ),
+    ] = False,
     # Retry/Timeout
     retries: Annotated[
         int,
@@ -984,19 +1235,33 @@ def main(
         Path,
         typer.Option(help="Path to log file"),
     ] = Path(DEFAULT_LOG_FILE),
+    # BMAD directory
+    bmad_dir: Annotated[
+        Path,
+        typer.Option(
+            "--bmad-dir",
+            help=(
+                "Path to the _bmad directory containing workflow files "
+                f"(default: {DEFAULT_BMAD_DIR})"
+            ),
+        ),
+    ] = Path(DEFAULT_BMAD_DIR),
 ) -> None:
     """
-    Automated BMAD Workflow Orchestrator.
+    Automated BMAD Workflow Orchestrator for GitHub Copilot CLI.
 
     Process stories through the BMAD workflow cycle:
     create-story -> dev-story -> code-review -> git-commit
+
+    Uses `gh copilot --yolo -p` to execute each step autonomously.
+    Prompts reference the BMAD workflow files in the project's _bmad/ directory.
 
     Examples:
 
         # Dry run to see what would be processed
         bmad-automate --dry-run
 
-        # Process next 3 stories with confirmation
+        # Process next 3 stories
         bmad-automate --limit 3
 
         # Process all stories in epic 3
@@ -1007,6 +1272,9 @@ def main(
 
         # Non-interactive with verbose output
         bmad-automate --yes --verbose --limit 5
+
+        # Custom BMAD directory
+        bmad-automate --bmad-dir path/to/_bmad
     """
     global _results, _start_time, _config
 
@@ -1027,10 +1295,23 @@ def main(
         skip_dev=skip_dev,
         skip_review=skip_review,
         skip_commit=skip_commit,
+        skip_retro=skip_retro,
+        skip_course_correct=skip_course_correct,
+        skip_retro_impl=skip_retro_impl,
         retries=retries,
         timeout=timeout,
+        bmad_dir=bmad_dir,
     )
     _config = config
+
+    # Validate BMAD directory exists
+    if not config.bmad_dir.exists():
+        console.print(
+            f"[red]Error: BMAD directory not found: {config.bmad_dir}[/red]\n"
+            "[dim]Make sure you're running from a BMAD project root, "
+            "or use --bmad-dir to specify the path.[/dim]"
+        )
+        raise typer.Exit(2)
 
     # Set up signal handlers
     setup_signal_handlers()
@@ -1042,9 +1323,15 @@ def main(
     if not total_actionable and not config.specific_stories:
         console.print(
             "[yellow]No actionable stories found in sprint-status.yaml "
-            "(looking for: in-progress, ready-for-dev, backlog)[/yellow]"
+            "(looking for: review, in-progress, ready-for-dev, backlog)[/yellow]"
         )
         raise typer.Exit(0)
+
+    # Build a status lookup so process_story knows each story's status
+    story_status_map: dict[str, str] = {}
+    for status, keys in stories_by_status.items():
+        for key in keys:
+            story_status_map[key] = status
 
     filtered_stories = filter_stories(stories_by_status, config)
 
@@ -1059,8 +1346,27 @@ def main(
         for story in filtered_stories:
             if _interrupted:
                 break
-            result = process_story(story, config)
+            result = process_story(story, config, story_status_map.get(story, ""))
             _results.append(result)
+        # Show retrospectives and course corrections that would run
+        if not config.skip_retro:
+            epics = get_epics_needing_retro(config)
+            if epics:
+                console.print("[bold]Retrospectives that would run:[/bold]")
+                for epic_num in epics:
+                    run_retrospective(epic_num, config)
+                if not config.skip_course_correct:
+                    console.print(
+                        "[bold]Course corrections that would run:[/bold]"
+                    )
+                    for epic_num in epics:
+                        run_course_correction(epic_num, config)
+                if not config.skip_retro_impl:
+                    console.print(
+                        "[bold]Retro implementations that would run:[/bold]"
+                    )
+                    for epic_num in epics:
+                        run_retro_implementation(epic_num, config)
         raise typer.Exit(0)
 
     # Confirmation
@@ -1075,6 +1381,9 @@ def main(
     log_to_file("=" * 50, config)
 
     _start_time = time.time()
+
+    retro_results: list[StepResult] = []
+    retro_done_epics: set[int] = set()
 
     # Process stories with progress
     console.print()
@@ -1101,7 +1410,9 @@ def main(
                 description=f"[cyan]Story {i + 1}/{len(filtered_stories)}: {story}",
             )
 
-            result = process_story(story, config)
+            result = process_story(
+                story, config, story_status_map.get(story, "")
+            )
             _results.append(result)
 
             print_story_summary(result, config)
@@ -1112,6 +1423,126 @@ def main(
             if result.status == StoryStatus.FAILED:
                 console.print(f"\n[red]Story {story} failed, stopping automation[/red]")
                 break
+
+            # After each successful story, check if its epic now needs a retro
+            if (
+                not config.skip_retro
+                and not _interrupted
+                and result.status == StoryStatus.COMPLETED
+            ):
+                epics = get_epics_needing_retro(config)
+                for epic_num in epics:
+                    if epic_num not in retro_done_epics:
+                        retro_done_epics.add(epic_num)
+                        progress.update(
+                            task,
+                            description=(
+                                f"[cyan]Epic {epic_num}: retrospective"
+                            ),
+                        )
+                        console.print(
+                            f"\n  [cyan]Epic {epic_num} complete — "
+                            f"running retrospective...[/cyan]"
+                        )
+                        log_to_file(
+                            f"Running retrospective for epic {epic_num}",
+                            config,
+                        )
+                        retro_result = run_retrospective(epic_num, config)
+                        retro_results.append(retro_result)
+
+                        if retro_result.status == StepStatus.SUCCESS:
+                            console.print(
+                                f"  [green]OK[/green] retro-epic-{epic_num}"
+                                f"  [dim]{format_duration(retro_result.duration)}"
+                                f"[/dim]"
+                            )
+                        elif retro_result.status == StepStatus.FAILED:
+                            console.print(
+                                f"  [red]XX[/red] retro-epic-{epic_num}"
+                                f"  [dim]{retro_result.error}[/dim]"
+                            )
+
+                        # Run course correction after successful retro
+                        if (
+                            not config.skip_course_correct
+                            and retro_result.status == StepStatus.SUCCESS
+                        ):
+                            progress.update(
+                                task,
+                                description=(
+                                    f"[cyan]Epic {epic_num}: "
+                                    f"course correction"
+                                ),
+                            )
+                            console.print(
+                                f"\n  [cyan]Running scrum-master course "
+                                f"correction for epic {epic_num}...[/cyan]"
+                            )
+                            log_to_file(
+                                f"Running course correction for epic {epic_num}",
+                                config,
+                            )
+                            cc_result = run_course_correction(
+                                epic_num, config
+                            )
+                            retro_results.append(cc_result)
+
+                            if cc_result.status == StepStatus.SUCCESS:
+                                console.print(
+                                    f"  [green]OK[/green] "
+                                    f"course-correct-epic-{epic_num}"
+                                    f"  [dim]"
+                                    f"{format_duration(cc_result.duration)}"
+                                    f"[/dim]"
+                                )
+                            elif cc_result.status == StepStatus.FAILED:
+                                console.print(
+                                    f"  [red]XX[/red] "
+                                    f"course-correct-epic-{epic_num}"
+                                    f"  [dim]{cc_result.error}[/dim]"
+                                )
+
+                        # Implement retro learnings after course correction
+                        if (
+                            not config.skip_retro_impl
+                            and retro_result.status == StepStatus.SUCCESS
+                        ):
+                            progress.update(
+                                task,
+                                description=(
+                                    f"[cyan]Epic {epic_num}: "
+                                    f"retro implementation"
+                                ),
+                            )
+                            console.print(
+                                f"\n  [cyan]Implementing retro learnings "
+                                f"for epic {epic_num}...[/cyan]"
+                            )
+                            log_to_file(
+                                f"Implementing retro learnings for "
+                                f"epic {epic_num}",
+                                config,
+                            )
+                            impl_result = run_retro_implementation(
+                                epic_num, config
+                            )
+                            retro_results.append(impl_result)
+
+                            if impl_result.status == StepStatus.SUCCESS:
+                                console.print(
+                                    f"  [green]OK[/green] "
+                                    f"retro-impl-epic-{epic_num}"
+                                    f"  [dim]"
+                                    f"{format_duration(impl_result.duration)}"
+                                    f"[/dim]"
+                                )
+                            elif impl_result.status == StepStatus.FAILED:
+                                console.print(
+                                    f"  [red]XX[/red] "
+                                    f"retro-impl-epic-{epic_num}"
+                                    f"  [dim]{impl_result.error}[/dim]"
+                                )
 
     # Final summary
     total_duration = time.time() - _start_time

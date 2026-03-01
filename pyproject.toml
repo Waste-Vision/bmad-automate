@@ -1,14 +1,14 @@
 [project]
 name = "bmad-automate"
 version = "0.1.0"
-description = "Automated BMAD Workflow Orchestrator for Claude Code"
+description = "Automated BMAD Workflow Orchestrator — powered by GitHub Copilot CLI"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [
     { name = "Robert Guss", email = "robertguss@gmail.com" },
 ]
-keywords = ["bmad", "automation", "claude", "workflow", "ai"]
+keywords = ["bmad", "automation", "workflow", "copilot", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",

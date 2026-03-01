@@ -1,12 +1,24 @@
 # BMAD Automate
 
-Automated [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) Workflow Orchestrator for Claude Code.
+Automated [BMAD](https://github.com/bmad-code-org/BMAD-METHOD) Workflow Orchestrator — powered by GitHub Copilot CLI.
 
-Processes stories through a complete development cycle:
+Processes stories through a complete development cycle using `gh copilot -p --yolo`:
 
 ```text
 create-story -> dev-story -> code-review -> git-commit
 ```
+
+For each step, the tool builds a plain-English prompt that tells Copilot to read
+the BMAD workflow engine and execute the corresponding workflow files from
+the project's `_bmad/` directory. No IDE-specific slash commands required.
+
+## Prerequisites
+
+- Python 3.11+
+- [GitHub CLI](https://cli.github.com/) with the Copilot extension:
+  ```bash
+  gh extension install github/gh-copilot
+  ```
 
 ## Installation
 
@@ -32,7 +44,7 @@ uv sync
 
 ## Usage
 
-Once installed, run from any BMAD project directory:
+Run from any BMAD project directory (must contain a `_bmad/` folder):
 
 ```bash
 # Show help
@@ -52,6 +64,9 @@ bmad-automate 3-3-account-translation
 
 # Non-interactive with verbose output
 bmad-automate --yes --verbose --limit 5
+
+# Custom BMAD directory location
+bmad-automate --bmad-dir path/to/_bmad
 ```
 
 ## Options
@@ -62,8 +77,14 @@ bmad-automate --yes --verbose --limit 5
 | --------------- | ---------------------------------------- |
 | `-n, --dry-run` | Preview what would run without executing |
 | `-y, --yes`     | Skip interactive confirmation prompt     |
-| `-v, --verbose` | Show full Claude output during execution |
+| `-v, --verbose` | Show full AI output during execution     |
 | `-q, --quiet`   | Minimal output (only errors and summary) |
+
+### BMAD Directory
+
+| Flag         | Default | Description                                        |
+| ------------ | ------- | -------------------------------------------------- |
+| `--bmad-dir` | `_bmad` | Path to the `_bmad/` directory with workflow files  |
 
 ### Story Selection
 
@@ -76,19 +97,22 @@ bmad-automate --yes --verbose --limit 5
 
 ### Step Control
 
-| Flag            | Description               |
-| --------------- | ------------------------- |
-| `--skip-create` | Skip create-story step    |
-| `--skip-dev`    | Skip dev-story step       |
-| `--skip-review` | Skip code-review step     |
-| `--skip-commit` | Skip git commit/push step |
+| Flag            | Description                                          |
+| --------------- | ---------------------------------------------------- |
+| `--skip-create` | Skip create-story step                               |
+| `--skip-dev`    | Skip dev-story step                                  |
+| `--skip-review` | Skip code-review step                                |
+| `--skip-commit` | Skip git commit/push step                            |
+| `--skip-retro`  | Skip automatic retrospective after completing an epic |
+| `--skip-course-correct` | Skip scrum-master course correction after epic retrospective |
+| `--skip-retro-impl` | Skip implementing retrospective learnings after course correction |
 
 ### Retry & Timeout
 
 | Flag          | Default | Description                 |
 | ------------- | ------- | --------------------------- |
 | `--retries N` | 1       | Retries per step on failure |
-| `--timeout N` | 600     | Timeout per step in seconds |
+| `--timeout N` | 3600 | Timeout per step in seconds |
 
 ### Paths
 
@@ -101,8 +125,8 @@ bmad-automate --yes --verbose --limit 5
 ## Requirements
 
 - Python 3.11+
-- Claude CLI installed and configured
-- BMAD workflows available (`bmad:bmm:workflows:*`)
+- [GitHub CLI](https://cli.github.com/) with the [Copilot extension](https://github.com/github/gh-copilot)
+- A BMAD project with a `_bmad/` directory containing workflow files
 
 ## Project Structure
 
@@ -110,6 +134,14 @@ The tool expects a BMAD project structure with:
 
 ```
 your-project/
+├── _bmad/                        # BMAD workflow files
+│   ├── core/tasks/workflow.xml   # Workflow engine
+│   └── bmm/workflows/4-implementation/
+│       ├── create-story/
+│       ├── dev-story/
+│       ├── code-review/
+│       ├── retrospective/
+│       └── correct-course/
 ├── _bmad-output/
 │   └── implementation-artifacts/
 │       ├── sprint-status.yaml    # Story statuses
@@ -122,14 +154,21 @@ your-project/
 
 Stories are processed in this order:
 
-1. **in-progress** - Resume interrupted work first
-2. **ready-for-dev** - Stories ready to implement
-3. **backlog** - New stories to start
+1. **review** — Resume interrupted code reviews (skips create + dev steps)
+2. **in-progress** — Resume interrupted work first
+3. **ready-for-dev** — Stories ready to implement
+4. **backlog** — New stories to start
 
 ## Smart Behaviors
 
 - **Auto-skip create**: If story file already exists, create-story is skipped
-- **Permission handling**: Uses `--dangerously-skip-permissions` for autonomous execution
+- **Status-aware step skipping**: Stories marked `review` automatically skip create-story and dev-story, going straight to code-review
+- **Automatic retrospectives**: After all stories succeed, checks if any epic has all stories done and its retrospective is still `optional` — runs the retrospective workflow automatically
+- **Scrum-master course correction**: After a successful retrospective, the scrum master evaluates whether a course correction is needed and executes it if so
+- **Retro implementation**: After course correction, a quick dev pass (reusing the dev-story workflow) applies concrete improvements from the retrospective (refactoring, tooling, test coverage, docs) where relevant
+- **Workflow-aware prompts**: Each step references the actual BMAD workflow files, so the AI reads and follows the full instructions
+- **GitHub Copilot CLI integration**: Uses `gh copilot -p --yolo` for autonomous execution
+- **BMAD directory detection**: Validates `_bmad/` exists before execution
 - **Graceful interruption**: Ctrl+C shows partial summary before exiting
 
 ## Upgrading
