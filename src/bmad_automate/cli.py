@@ -1481,9 +1481,8 @@ def main(
     retro_done_epics: set[int] = set()
 
     # Run any already-pending retrospective pipelines BEFORE processing stories
-    if not config.skip_retro and not _interrupted:
-        pending_epics = get_epics_needing_retro(config)
-        for epic_num in pending_epics:
+    if pending_retro_epics and not _interrupted:
+        for epic_num in pending_retro_epics:
             if _interrupted:
                 break
             retro_done_epics.add(epic_num)
@@ -1600,207 +1599,208 @@ def main(
                     )
 
     # Process stories with progress
-    console.print()
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-        console=console,
-        transient=False,
-    ) as progress:
-        task = progress.add_task(
-            "[cyan]Processing stories...", total=len(filtered_stories)
-        )
-
-        for i, story in enumerate(filtered_stories):
-            if _interrupted:
-                console.print("\n[yellow]Interrupted by user[/yellow]")
-                break
-
-            progress.update(
-                task,
-                description=f"[cyan]Story {i + 1}/{len(filtered_stories)}: {story}",
+    if filtered_stories:
+        console.print()
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task(
+                "[cyan]Processing stories...", total=len(filtered_stories)
             )
 
-            result = process_story(
-                story, config, story_status_map.get(story, "")
-            )
-            _results.append(result)
+            for i, story in enumerate(filtered_stories):
+                if _interrupted:
+                    console.print("\n[yellow]Interrupted by user[/yellow]")
+                    break
 
-            print_story_summary(result, config)
+                progress.update(
+                    task,
+                    description=f"[cyan]Story {i + 1}/{len(filtered_stories)}: {story}",
+                )
 
-            progress.advance(task)
+                result = process_story(
+                    story, config, story_status_map.get(story, "")
+                )
+                _results.append(result)
 
-            # Stop on failure unless we want to continue
-            if result.status == StoryStatus.FAILED:
-                console.print(f"\n[red]Story {story} failed, stopping automation[/red]")
-                break
+                print_story_summary(result, config)
 
-            # After each successful story, check if its epic now needs a retro
-            if (
-                not config.skip_retro
-                and not _interrupted
-                and result.status == StoryStatus.COMPLETED
-            ):
-                epics = get_epics_needing_retro(config)
-                for epic_num in epics:
-                    if epic_num not in retro_done_epics:
-                        retro_done_epics.add(epic_num)
-                        progress.update(
-                            task,
-                            description=(
-                                f"[cyan]Epic {epic_num}: retrospective"
-                            ),
-                        )
-                        console.print(
-                            f"\n  [cyan]Epic {epic_num} complete — "
-                            f"running retrospective...[/cyan]"
-                        )
-                        log_to_file(
-                            f"Running retrospective for epic {epic_num}",
-                            config,
-                        )
-                        retro_result = run_retrospective(epic_num, config)
-                        retro_results.append(retro_result)
+                progress.advance(task)
 
-                        if retro_result.status == StepStatus.SUCCESS:
-                            console.print(
-                                f"  [green]OK[/green] retro-epic-{epic_num}"
-                                f"  [dim]{format_duration(retro_result.duration)}"
-                                f"[/dim]"
-                            )
-                        elif retro_result.status == StepStatus.FAILED:
-                            console.print(
-                                f"  [red]XX[/red] retro-epic-{epic_num}"
-                                f"  [dim]{retro_result.error}[/dim]"
-                            )
+                # Stop on failure unless we want to continue
+                if result.status == StoryStatus.FAILED:
+                    console.print(f"\n[red]Story {story} failed, stopping automation[/red]")
+                    break
 
-                        # Run course correction after successful retro
-                        if (
-                            not config.skip_course_correct
-                            and retro_result.status == StepStatus.SUCCESS
-                        ):
+                # After each successful story, check if its epic now needs a retro
+                if (
+                    not config.skip_retro
+                    and not _interrupted
+                    and result.status == StoryStatus.COMPLETED
+                ):
+                    epics = get_epics_needing_retro(config)
+                    for epic_num in epics:
+                        if epic_num not in retro_done_epics:
+                            retro_done_epics.add(epic_num)
                             progress.update(
                                 task,
                                 description=(
-                                    f"[cyan]Epic {epic_num}: "
-                                    f"course correction"
+                                    f"[cyan]Epic {epic_num}: retrospective"
                                 ),
                             )
                             console.print(
-                                f"\n  [cyan]Running scrum-master course "
-                                f"correction for epic {epic_num}...[/cyan]"
+                                f"\n  [cyan]Epic {epic_num} complete — "
+                                f"running retrospective...[/cyan]"
                             )
                             log_to_file(
-                                f"Running course correction for epic {epic_num}",
+                                f"Running retrospective for epic {epic_num}",
                                 config,
                             )
-                            cc_result = run_course_correction(
-                                epic_num, config
-                            )
-                            retro_results.append(cc_result)
+                            retro_result = run_retrospective(epic_num, config)
+                            retro_results.append(retro_result)
 
-                            if cc_result.status == StepStatus.SUCCESS:
+                            if retro_result.status == StepStatus.SUCCESS:
                                 console.print(
-                                    f"  [green]OK[/green] "
-                                    f"course-correct-epic-{epic_num}"
-                                    f"  [dim]"
-                                    f"{format_duration(cc_result.duration)}"
+                                    f"  [green]OK[/green] retro-epic-{epic_num}"
+                                    f"  [dim]{format_duration(retro_result.duration)}"
                                     f"[/dim]"
                                 )
-                            elif cc_result.status == StepStatus.FAILED:
+                            elif retro_result.status == StepStatus.FAILED:
                                 console.print(
-                                    f"  [red]XX[/red] "
-                                    f"course-correct-epic-{epic_num}"
-                                    f"  [dim]{cc_result.error}[/dim]"
+                                    f"  [red]XX[/red] retro-epic-{epic_num}"
+                                    f"  [dim]{retro_result.error}[/dim]"
                                 )
 
-                        # Implement retro learnings after course correction
-                        if (
-                            not config.skip_retro_impl
-                            and retro_result.status == StepStatus.SUCCESS
-                        ):
-                            progress.update(
-                                task,
-                                description=(
-                                    f"[cyan]Epic {epic_num}: "
-                                    f"retro implementation"
-                                ),
-                            )
-                            console.print(
-                                f"\n  [cyan]Implementing retro learnings "
-                                f"for epic {epic_num}...[/cyan]"
-                            )
-                            log_to_file(
-                                f"Implementing retro learnings for "
-                                f"epic {epic_num}",
-                                config,
-                            )
-                            impl_result = run_retro_implementation(
-                                epic_num, config
-                            )
-                            retro_results.append(impl_result)
+                            # Run course correction after successful retro
+                            if (
+                                not config.skip_course_correct
+                                and retro_result.status == StepStatus.SUCCESS
+                            ):
+                                progress.update(
+                                    task,
+                                    description=(
+                                        f"[cyan]Epic {epic_num}: "
+                                        f"course correction"
+                                    ),
+                                )
+                                console.print(
+                                    f"\n  [cyan]Running scrum-master course "
+                                    f"correction for epic {epic_num}...[/cyan]"
+                                )
+                                log_to_file(
+                                    f"Running course correction for epic {epic_num}",
+                                    config,
+                                )
+                                cc_result = run_course_correction(
+                                    epic_num, config
+                                )
+                                retro_results.append(cc_result)
 
-                            if impl_result.status == StepStatus.SUCCESS:
-                                console.print(
-                                    f"  [green]OK[/green] "
-                                    f"retro-impl-epic-{epic_num}"
-                                    f"  [dim]"
-                                    f"{format_duration(impl_result.duration)}"
-                                    f"[/dim]"
-                                )
-                            elif impl_result.status == StepStatus.FAILED:
-                                console.print(
-                                    f"  [red]XX[/red] "
-                                    f"retro-impl-epic-{epic_num}"
-                                    f"  [dim]{impl_result.error}[/dim]"
-                                )
+                                if cc_result.status == StepStatus.SUCCESS:
+                                    console.print(
+                                        f"  [green]OK[/green] "
+                                        f"course-correct-epic-{epic_num}"
+                                        f"  [dim]"
+                                        f"{format_duration(cc_result.duration)}"
+                                        f"[/dim]"
+                                    )
+                                elif cc_result.status == StepStatus.FAILED:
+                                    console.print(
+                                        f"  [red]XX[/red] "
+                                        f"course-correct-epic-{epic_num}"
+                                        f"  [dim]{cc_result.error}[/dim]"
+                                    )
 
-                        # Prepare next epic if it exists
-                        if (
-                            not config.skip_next_epic_prep
-                            and retro_result.status == StepStatus.SUCCESS
-                            and has_next_epic(epic_num, config)
-                        ):
-                            next_epic = epic_num + 1
-                            progress.update(
-                                task,
-                                description=(
-                                    f"[cyan]Epic {next_epic}: "
-                                    f"preparation"
-                                ),
-                            )
-                            console.print(
-                                f"\n  [cyan]Preparing next epic "
-                                f"{next_epic} (based on epic "
-                                f"{epic_num})...[/cyan]"
-                            )
-                            log_to_file(
-                                f"Preparing next epic {next_epic} "
-                                f"after epic {epic_num}",
-                                config,
-                            )
-                            prep_result = run_next_epic_preparation(
-                                epic_num, config
-                            )
-                            retro_results.append(prep_result)
+                            # Implement retro learnings after course correction
+                            if (
+                                not config.skip_retro_impl
+                                and retro_result.status == StepStatus.SUCCESS
+                            ):
+                                progress.update(
+                                    task,
+                                    description=(
+                                        f"[cyan]Epic {epic_num}: "
+                                        f"retro implementation"
+                                    ),
+                                )
+                                console.print(
+                                    f"\n  [cyan]Implementing retro learnings "
+                                    f"for epic {epic_num}...[/cyan]"
+                                )
+                                log_to_file(
+                                    f"Implementing retro learnings for "
+                                    f"epic {epic_num}",
+                                    config,
+                                )
+                                impl_result = run_retro_implementation(
+                                    epic_num, config
+                                )
+                                retro_results.append(impl_result)
 
-                            if prep_result.status == StepStatus.SUCCESS:
-                                console.print(
-                                    f"  [green]OK[/green] "
-                                    f"prep-next-epic-{next_epic}"
-                                    f"  [dim]"
-                                    f"{format_duration(prep_result.duration)}"
-                                    f"[/dim]"
+                                if impl_result.status == StepStatus.SUCCESS:
+                                    console.print(
+                                        f"  [green]OK[/green] "
+                                        f"retro-impl-epic-{epic_num}"
+                                        f"  [dim]"
+                                        f"{format_duration(impl_result.duration)}"
+                                        f"[/dim]"
+                                    )
+                                elif impl_result.status == StepStatus.FAILED:
+                                    console.print(
+                                        f"  [red]XX[/red] "
+                                        f"retro-impl-epic-{epic_num}"
+                                        f"  [dim]{impl_result.error}[/dim]"
+                                    )
+
+                            # Prepare next epic if it exists
+                            if (
+                                not config.skip_next_epic_prep
+                                and retro_result.status == StepStatus.SUCCESS
+                                and has_next_epic(epic_num, config)
+                            ):
+                                next_epic = epic_num + 1
+                                progress.update(
+                                    task,
+                                    description=(
+                                        f"[cyan]Epic {next_epic}: "
+                                        f"preparation"
+                                    ),
                                 )
-                            elif prep_result.status == StepStatus.FAILED:
                                 console.print(
-                                    f"  [red]XX[/red] "
-                                    f"prep-next-epic-{next_epic}"
-                                    f"  [dim]{prep_result.error}[/dim]"
+                                    f"\n  [cyan]Preparing next epic "
+                                    f"{next_epic} (based on epic "
+                                    f"{epic_num})...[/cyan]"
                                 )
+                                log_to_file(
+                                    f"Preparing next epic {next_epic} "
+                                    f"after epic {epic_num}",
+                                    config,
+                                )
+                                prep_result = run_next_epic_preparation(
+                                    epic_num, config
+                                )
+                                retro_results.append(prep_result)
+
+                                if prep_result.status == StepStatus.SUCCESS:
+                                    console.print(
+                                        f"  [green]OK[/green] "
+                                        f"prep-next-epic-{next_epic}"
+                                        f"  [dim]"
+                                        f"{format_duration(prep_result.duration)}"
+                                        f"[/dim]"
+                                    )
+                                elif prep_result.status == StepStatus.FAILED:
+                                    console.print(
+                                        f"  [red]XX[/red] "
+                                        f"prep-next-epic-{next_epic}"
+                                        f"  [dim]{prep_result.error}[/dim]"
+                                    )
 
     # Final summary
     total_duration = time.time() - _start_time
