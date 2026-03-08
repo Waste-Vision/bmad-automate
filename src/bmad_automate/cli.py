@@ -72,6 +72,7 @@ WORKFLOW_REVIEW = "bmm/workflows/4-implementation/code-review/workflow.yaml"
 WORKFLOW_RETRO = "bmm/workflows/4-implementation/retrospective/workflow.yaml"
 WORKFLOW_COURSE_CORRECT = "bmm/workflows/4-implementation/correct-course/workflow.yaml"
 WORKFLOW_QUICK_DEV = "bmm/workflows/bmad-quick-flow/quick-dev/workflow.md"
+WORKFLOW_EPIC_PREP = "bmm/workflows/bmad-quick-flow/quick-dev/workflow.md"
 
 # Rich console for output
 console = Console()
@@ -179,6 +180,7 @@ class Config:
     skip_retro: bool = False
     skip_course_correct: bool = False
     skip_retro_impl: bool = False
+    skip_next_epic_prep: bool = False
 
     # Retry/Timeout
     retries: int = DEFAULT_RETRIES
@@ -792,8 +794,7 @@ def run_retrospective(epic_num: int, config: Config) -> StepResult:
     bmad = config.bmad_dir
 
     retro_prompt = (
-        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
-        f"Then load and execute the workflow at {bmad}/{WORKFLOW_RETRO}. "
+        f"run the scrum-master retrospective workflow for a completed epic. "
         f"Run the retrospective for Epic {epic_num}. "
         "Do not ask clarifying questions - use best judgment. "
         "Process the entire workflow automatically (YOLO mode)."
@@ -831,7 +832,6 @@ def run_course_correction(epic_num: int, config: Config) -> StepResult:
     bmad = config.bmad_dir
 
     cc_prompt = (
-        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
         f"Then load and execute the workflow at {bmad}/{WORKFLOW_COURSE_CORRECT}. "
         f"Evaluate whether a course correction is needed after Epic {epic_num}. "
         "Review the retrospective output and current sprint status. "
@@ -874,12 +874,11 @@ def run_retro_implementation(epic_num: int, config: Config) -> StepResult:
     bmad = config.bmad_dir
 
     impl_prompt = (
-        f"Read and follow the BMAD workflow engine at {bmad}/{WORKFLOW_ENGINE}. "
-        f"Then load and execute the workflow at {bmad}/{WORKFLOW_QUICK_DEV}. "
+        f"Load and execute the workflow at {bmad}/{WORKFLOW_QUICK_DEV}. "
         f"Implement the learnings from the Epic {epic_num} retrospective. "
-        "Review the retrospective output and apply any relevant improvements "
+        "Review the retrospective output and apply all improvements "
         "to the codebase — refactoring, tooling, test coverage, documentation, "
-        "or process improvements. Skip anything that is not applicable. "
+        "or process improvements. Skip anything that is not directly actionable in the code or documentation."
         "Do not ask clarifying questions - use best judgment. "
         "Process the entire workflow automatically (YOLO mode)."
     )
@@ -896,6 +895,84 @@ def run_retro_implementation(epic_num: int, config: Config) -> StepResult:
         return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
 
     return run_step(step_name, command, f"epic-{epic_num}", config)
+
+
+def has_next_epic(epic_num: int, config: Config) -> bool:
+    """
+    Check whether the next epic (epic_num + 1) has stories in sprint-status.yaml.
+
+    Reads the sprint-status.yaml file and looks for any story keys that
+    start with the next epic's prefix (e.g., '4-' if epic_num is 3).
+
+    Args:
+        epic_num: The current (just-completed) epic number.
+        config: Configuration containing the sprint_status file path.
+
+    Returns:
+        True if there are stories for the next epic, False otherwise.
+    """
+    if not config.sprint_status.exists():
+        return False
+
+    with open(config.sprint_status, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not data or "development_status" not in data:
+        return False
+
+    dev_status = data["development_status"]
+    next_epic_prefix = f"{epic_num + 1}-"
+    story_pattern = re.compile(r"^\d+-\d+-.+$")
+
+    return any(
+        key.startswith(next_epic_prefix) and story_pattern.match(key)
+        for key in dev_status.keys()
+    )
+
+
+def run_next_epic_preparation(
+    previous_epic_num: int, config: Config
+) -> StepResult:
+    """
+    Run preparation tasks for the next epic after a completed retro cycle.
+
+    After the retrospective, course correction, and retro implementation for
+    an epic are done, this step prepares the next epic by creating all its
+    story files and reviewing the implementation plan.
+
+    The preparation runs the create-story workflow for each story in the
+    next epic, ensuring all artifacts are ready before development begins.
+
+    Args:
+        previous_epic_num: The epic number that just completed.
+        config: Configuration with timeout, retries, and output settings.
+
+    Returns:
+        StepResult with status and duration.
+    """
+    ai = AI_COMMAND
+    bmad = config.bmad_dir
+    next_epic = previous_epic_num + 1
+
+    prep_prompt = (
+        f"Then load and execute the workflow at {bmad}/{WORKFLOW_EPIC_PREP}. "
+        f"run all prep tasks for epic {next_epic} based on retrospective of {previous_epic_num}. "
+        "Do not ask clarifying questions - use best judgment. "
+        "Process the entire workflow automatically (YOLO mode)."
+    )
+
+    command = f'{ai} "{prep_prompt}"'
+    step_name = f"prep-next-epic-{next_epic}"
+
+    if config.dry_run:
+        console.print(
+            f"  [dim][DRY-RUN][/dim] Would run: "
+            f"[magenta]{step_name}[/magenta]"
+        )
+        console.print(f"  [dim]Command: {command}[/dim]")
+        return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
+
+    return run_step(step_name, command, f"epic-{next_epic}", config)
 
 
 def print_story_summary(result: StoryResult, config: Config) -> None:
@@ -1213,6 +1290,13 @@ def main(
             help="Skip implementing retrospective learnings after course correction",
         ),
     ] = False,
+    skip_next_epic_prep: Annotated[
+        bool,
+        typer.Option(
+            "--skip-next-epic-prep",
+            help="Skip preparation tasks for the next epic after retro implementation",
+        ),
+    ] = False,
     # Retry/Timeout
     retries: Annotated[
         int,
@@ -1298,6 +1382,7 @@ def main(
         skip_retro=skip_retro,
         skip_course_correct=skip_course_correct,
         skip_retro_impl=skip_retro_impl,
+        skip_next_epic_prep=skip_next_epic_prep,
         retries=retries,
         timeout=timeout,
         bmad_dir=bmad_dir,
@@ -1367,6 +1452,14 @@ def main(
                     )
                     for epic_num in epics:
                         run_retro_implementation(epic_num, config)
+                if not config.skip_next_epic_prep:
+                    for epic_num in epics:
+                        if has_next_epic(epic_num, config):
+                            console.print(
+                                "[bold]Next epic preparations that "
+                                "would run:[/bold]"
+                            )
+                            run_next_epic_preparation(epic_num, config)
         raise typer.Exit(0)
 
     # Confirmation
@@ -1542,6 +1635,50 @@ def main(
                                     f"  [red]XX[/red] "
                                     f"retro-impl-epic-{epic_num}"
                                     f"  [dim]{impl_result.error}[/dim]"
+                                )
+
+                        # Prepare next epic if it exists
+                        if (
+                            not config.skip_next_epic_prep
+                            and retro_result.status == StepStatus.SUCCESS
+                            and has_next_epic(epic_num, config)
+                        ):
+                            next_epic = epic_num + 1
+                            progress.update(
+                                task,
+                                description=(
+                                    f"[cyan]Epic {next_epic}: "
+                                    f"preparation"
+                                ),
+                            )
+                            console.print(
+                                f"\n  [cyan]Preparing next epic "
+                                f"{next_epic} (based on epic "
+                                f"{epic_num})...[/cyan]"
+                            )
+                            log_to_file(
+                                f"Preparing next epic {next_epic} "
+                                f"after epic {epic_num}",
+                                config,
+                            )
+                            prep_result = run_next_epic_preparation(
+                                epic_num, config
+                            )
+                            retro_results.append(prep_result)
+
+                            if prep_result.status == StepStatus.SUCCESS:
+                                console.print(
+                                    f"  [green]OK[/green] "
+                                    f"prep-next-epic-{next_epic}"
+                                    f"  [dim]"
+                                    f"{format_duration(prep_result.duration)}"
+                                    f"[/dim]"
+                                )
+                            elif prep_result.status == StepStatus.FAILED:
+                                console.print(
+                                    f"  [red]XX[/red] "
+                                    f"prep-next-epic-{next_epic}"
+                                    f"  [dim]{prep_result.error}[/dim]"
                                 )
 
     # Final summary
