@@ -3,7 +3,8 @@ BMAD Workflow Automation CLI.
 
 Automates the BMAD (Business Method for Agile Development) workflow cycle
 for stories defined in sprint-status.yaml. For each actionable story, the
-script orchestrates a full development cycle using GitHub Copilot CLI:
+script orchestrates a full development cycle using an AI CLI provider
+(Claude by default, or GitHub Copilot):
 
     create-story -> dev-story -> code-review -> git-commit-push
 
@@ -19,7 +20,7 @@ Features:
 
 Requirements:
     - Python 3.11+
-    - GitHub Copilot CLI installed (gh extension install github/gh-copilot)
+    - Claude CLI installed (default), or GitHub Copilot CLI (--ai-provider github)
     - A BMAD project with _bmad/ workflow files
 
 Usage:
@@ -61,8 +62,12 @@ DEFAULT_RETRIES = 1
 DEFAULT_TIMEOUT = 3600  # 60 minutes
 DEFAULT_BMAD_DIR = "_bmad"  # Default BMAD directory in project root
 
-# GitHub Copilot CLI command for non-interactive autonomous execution
-AI_COMMAND = "gh copilot --yolo -p"
+# AI provider commands for non-interactive autonomous execution
+AI_PROVIDERS = {
+    "claude": "claude --dangerously-skip-permissions -p",
+    "github": "gh copilot --yolo -p",
+}
+DEFAULT_AI_PROVIDER = "claude"
 
 # Workflow paths relative to the BMAD directory
 WORKFLOW_ENGINE = "core/tasks/workflow.xml"
@@ -188,6 +193,14 @@ class Config:
 
     # BMAD directory
     bmad_dir: Path = Path(DEFAULT_BMAD_DIR)
+
+    # AI provider
+    ai_provider: str = DEFAULT_AI_PROVIDER
+
+    @property
+    def ai_command(self) -> str:
+        """Return the AI CLI command for the configured provider."""
+        return AI_PROVIDERS[self.ai_provider]
 
 
 # Typer app instance
@@ -509,14 +522,17 @@ def run_step(
                 errors="replace",
             )
 
-            # Filter out known copilot CLI noise from stderr
+            # Filter out known CLI noise from stderr
             stderr = result.stderr or ""
-            stderr = "\n".join(
-                line
-                for line in stderr.splitlines()
-                if "unknown option '--no-warnings'" not in line
-                and "Try 'copilot --help'" not in line
-            ).strip()
+            if config.ai_provider == "github":
+                stderr = "\n".join(
+                    line
+                    for line in stderr.splitlines()
+                    if "unknown option '--no-warnings'" not in line
+                    and "Try 'copilot --help'" not in line
+                ).strip()
+            else:
+                stderr = stderr.strip()
 
             # Log output
             if result.stdout:
@@ -611,8 +627,8 @@ def process_story(
 
     log_to_file(f"=== Starting story: {story_key} ===", config)
 
-    # GitHub Copilot CLI command prefix
-    ai = AI_COMMAND
+    # AI CLI command prefix
+    ai = config.ai_command
     bmad = config.bmad_dir
 
     # Build plain-English prompts that reference the BMAD workflow files
@@ -663,7 +679,7 @@ def process_story(
             console.print("  [dim]Story file exists, skipping create-story[/dim]")
         skip_create = True
 
-    # Define steps – each invokes GitHub Copilot CLI
+    # Define steps – each invokes the configured AI CLI
     step_definitions = [
         (
             "create-story",
@@ -791,7 +807,7 @@ def run_retrospective(epic_num: int, config: Config) -> StepResult:
     Returns:
         StepResult with status and duration.
     """
-    ai = AI_COMMAND
+    ai = config.ai_command
     bmad = config.bmad_dir
 
     retro_prompt = (
@@ -828,7 +844,7 @@ def run_course_correction(epic_num: int, config: Config) -> StepResult:
     Returns:
         StepResult with status and duration.
     """
-    ai = AI_COMMAND
+    ai = config.ai_command
     bmad = config.bmad_dir
 
     cc_prompt = (
@@ -869,7 +885,7 @@ def run_retro_implementation(epic_num: int, config: Config) -> StepResult:
     Returns:
         StepResult with status and duration.
     """
-    ai = AI_COMMAND
+    ai = config.ai_command
     bmad = config.bmad_dir
 
     impl_prompt = (
@@ -948,7 +964,7 @@ def run_next_epic_preparation(
     Returns:
         StepResult with status and duration.
     """
-    ai = AI_COMMAND
+    ai = config.ai_command
     bmad = config.bmad_dir
     next_epic = previous_epic_num + 1
 
@@ -1327,15 +1343,27 @@ def main(
             ),
         ),
     ] = Path(DEFAULT_BMAD_DIR),
+    # AI provider
+    ai_provider: Annotated[
+        str,
+        typer.Option(
+            "--ai-provider",
+            help=(
+                "AI provider to use: 'claude' (Claude CLI) or 'github' "
+                f"(GitHub Copilot CLI). Default: {DEFAULT_AI_PROVIDER}"
+            ),
+        ),
+    ] = DEFAULT_AI_PROVIDER,
 ) -> None:
     """
-    Automated BMAD Workflow Orchestrator for GitHub Copilot CLI.
+    Automated BMAD Workflow Orchestrator.
 
     Process stories through the BMAD workflow cycle:
     create-story -> dev-story -> code-review -> git-commit
 
-    Uses `gh copilot --yolo -p` to execute each step autonomously.
-    Prompts reference the BMAD workflow files in the project's _bmad/ directory.
+    Uses Claude CLI (default) or GitHub Copilot CLI to execute each step
+    autonomously. Prompts reference the BMAD workflow files in the project's
+    _bmad/ directory.
 
     Examples:
 
@@ -1356,6 +1384,9 @@ def main(
 
         # Custom BMAD directory
         bmad-automate --bmad-dir path/to/_bmad
+
+        # Use GitHub Copilot instead of Claude
+        bmad-automate --ai-provider github
     """
     global _results, _start_time, _config
 
@@ -1383,8 +1414,17 @@ def main(
         retries=retries,
         timeout=timeout,
         bmad_dir=bmad_dir,
+        ai_provider=ai_provider,
     )
     _config = config
+
+    # Validate AI provider
+    if config.ai_provider not in AI_PROVIDERS:
+        console.print(
+            f"[red]Error: Unknown AI provider '{config.ai_provider}'[/red]\n"
+            f"[dim]Available providers: {', '.join(AI_PROVIDERS)}[/dim]"
+        )
+        raise typer.Exit(2)
 
     # Validate BMAD directory exists
     if not config.bmad_dir.exists():
