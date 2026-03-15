@@ -1918,10 +1918,15 @@ def main(
 
     total_actionable = sum(len(v) for v in stories_by_status.values())
 
-    # Check for pending retrospectives before deciding whether to exit
+    # Check for pending retrospectives before deciding whether to exit.
+    # When --epic is specified, only consider retros for those epics.
     pending_retro_epics: list[int] = []
     if not config.skip_retro:
         pending_retro_epics = get_epics_needing_retro(config)
+        if config.epic:
+            pending_retro_epics = [
+                e for e in pending_retro_epics if e in config.epic
+            ]
 
     # When --epic is used and those epics are fully complete, automatically
     # include them in the after-epic pipeline so the user doesn't have to
@@ -2107,13 +2112,17 @@ def main(
                     console.print(f"\n[red]Story {story} failed, stopping automation[/red]")
                     break
 
-                # After each successful story, check if its epic now needs a retro
+                # After each successful story, check if ITS epic now needs a retro.
+                # Only check the epic that the just-completed story belongs to —
+                # don't trigger retros for unrelated epics mid-run.
                 if (
                     not config.skip_retro
                     and not _interrupted
                     and result.status == StoryStatus.COMPLETED
                 ):
+                    story_epic = int(story.split("-")[0])
                     epics = get_epics_needing_retro(config)
+                    epics = [e for e in epics if e == story_epic]
                     for epic_num in epics:
                         if epic_num not in retro_done_epics:
                             retro_done_epics.add(epic_num)
