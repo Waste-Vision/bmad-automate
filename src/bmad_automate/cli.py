@@ -1430,6 +1430,114 @@ def run_after_epic_pipeline(
                 f"  [dim]{prep_result.error}[/dim]"
             )
 
+    # 5. Commit and push any changes from the after-epic pipeline
+    if not _interrupted and not config.dry_run:
+        commit_result = run_after_epic_commit(epic_num, config)
+        retro_results.append(commit_result)
+
+        if commit_result.status == StepStatus.SUCCESS:
+            console.print(
+                f"  [green]OK[/green] "
+                f"after-epic-commit-{epic_num}"
+                f"  [dim]{format_duration(commit_result.duration)}[/dim]"
+            )
+        elif commit_result.status == StepStatus.FAILED:
+            console.print(
+                f"  [red]XX[/red] "
+                f"after-epic-commit-{epic_num}"
+                f"  [dim]{commit_result.error}[/dim]"
+            )
+
+
+def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
+    """Commit and push any changes produced by the after-epic pipeline.
+
+    Runs ``git add -A && git commit && git push`` directly.  If there are
+    no changes to commit the step is reported as SUCCESS (nothing to do).
+
+    Args:
+        epic_num: Epic number (used in the commit message).
+        config: Configuration for logging.
+
+    Returns:
+        StepResult with status and duration.
+    """
+    step_name = f"after-epic-commit-{epic_num}"
+    start_time = time.time()
+
+    if not config.quiet:
+        console.print(
+            f"  [dim]Running[/dim] [magenta]{step_name}[/magenta]..."
+        )
+    log_to_file(f"Running {step_name}", config)
+
+    try:
+        # Check if there are any changes to commit
+        status = subprocess.run(
+            "git status --porcelain",
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if not (status.stdout or "").strip():
+            duration = time.time() - start_time
+            log_to_file(f"SUCCESS: {step_name} (nothing to commit)", config)
+            return StepResult(
+                name=step_name, status=StepStatus.SUCCESS, duration=duration
+            )
+
+        cmd = (
+            'git add -A && git commit -m '
+            f'"after-epic: retro and prep for epic {epic_num}" '
+            '&& git push'
+        )
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        if result.stdout:
+            log_to_file(f"STDOUT:\n{result.stdout}", config)
+        if result.stderr:
+            log_to_file(f"STDERR:\n{result.stderr}", config)
+
+        duration = time.time() - start_time
+        if result.returncode == 0:
+            log_to_file(f"SUCCESS: {step_name} ({format_duration(duration)})", config)
+            return StepResult(
+                name=step_name, status=StepStatus.SUCCESS, duration=duration
+            )
+
+        error = (result.stderr or "").strip() or f"Exit code: {result.returncode}"
+        log_to_file(f"FAILED: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name, status=StepStatus.FAILED,
+            error=error, duration=duration,
+        )
+
+    except subprocess.TimeoutExpired:
+        error = "Timed out after 120s"
+        log_to_file(f"TIMEOUT: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name, status=StepStatus.FAILED,
+            error=error, duration=time.time() - start_time,
+        )
+
+    except Exception as e:
+        error = str(e)
+        log_to_file(f"ERROR: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name, status=StepStatus.FAILED,
+            error=error, duration=time.time() - start_time,
+        )
+
 
 def print_story_summary(result: StoryResult, config: Config) -> None:
     """
