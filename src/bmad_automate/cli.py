@@ -6,7 +6,7 @@ for stories defined in sprint-status.yaml. For each actionable story, the
 script orchestrates a full development cycle using an AI CLI provider
 (Claude by default, or GitHub Copilot):
 
-    create-story -> dev-story -> code-review -> git-commit-push
+    create-story -> dev-story -> code-review -> git-commit -> git-pull
 
 Features:
     - Beautiful terminal UX with progress bars and colored output (via Rich)
@@ -29,6 +29,7 @@ Usage:
 See --help for full options or the README for comprehensive documentation.
 """
 
+import atexit
 import re
 import signal
 import subprocess
@@ -48,6 +49,7 @@ from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -81,6 +83,28 @@ WORKFLOW_EPIC_PREP = "bmm/workflows/bmad-quick-flow/quick-dev/workflow.md"
 
 # Rich console for output
 console = Console()
+
+# Terminal title helpers — work on Windows Terminal, PowerShell, and most
+# xterm-compatible terminals.  The escape sequence is harmless on terminals
+# that don't support it (they simply ignore it).
+
+def set_terminal_title(title: str) -> None:
+    """Set the terminal window title via an OSC escape sequence."""
+    sys.stdout.write(f"\033]0;{title}\007")
+    sys.stdout.flush()
+
+
+def set_running_title() -> None:
+    """Replace the terminal title with a running indicator."""
+    set_terminal_title("\u23f3 bmad-automate \u2014 running\u2026")
+
+
+def restore_terminal_title(success: bool = True) -> None:
+    """Set the terminal title to a finished/failed indicator."""
+    if success:
+        set_terminal_title("\u2705 bmad-automate \u2014 finished")
+    else:
+        set_terminal_title("\u274c bmad-automate \u2014 failed")
 
 
 class StepStatus(Enum):
@@ -175,13 +199,17 @@ class Config:
     limit: int = 0  # 0 = unlimited
     start_from: str = ""
     specific_stories: list[str] = field(default_factory=list)
-    epic: int = 0  # 0 = all epics, otherwise filter to specific epic number
+    epic: list[int] = field(default_factory=list)  # empty = all epics
+    after_epic: list[int] = field(
+        default_factory=list
+    )  # explicitly run after-epic steps for these epics
 
     # Step control
     skip_create: bool = False
     skip_dev: bool = False
     skip_review: bool = False
     skip_commit: bool = False
+    skip_pull: bool = False
     skip_retro: bool = False
     skip_course_correct: bool = False
     skip_retro_impl: bool = False
@@ -398,9 +426,11 @@ def filter_stories(
                 f"{missing}[/yellow]"
             )
         # Apply epic filter to specific stories too
-        if config.epic > 0:
-            epic_prefix = f"{config.epic}-"
-            valid_stories = [s for s in valid_stories if s.startswith(epic_prefix)]
+        if config.epic:
+            epic_prefixes = tuple(f"{e}-" for e in config.epic)
+            valid_stories = [
+                s for s in valid_stories if s.startswith(epic_prefixes)
+            ]
         return valid_stories
 
     # Build ordered list: review first (resume interrupted reviews),
@@ -412,13 +442,14 @@ def filter_stories(
         + stories_by_status.get("backlog", [])
     )
 
-    # Apply epic filter (e.g., --epic 3 filters to stories starting with "3-")
-    if config.epic > 0:
-        epic_prefix = f"{config.epic}-"
-        stories = [s for s in stories if s.startswith(epic_prefix)]
+    # Apply epic filter (e.g., --epic 3 or --epic 3,4,5)
+    if config.epic:
+        epic_prefixes = tuple(f"{e}-" for e in config.epic)
+        stories = [s for s in stories if s.startswith(epic_prefixes)]
         if not stories:
             console.print(
-                f"[yellow]Warning: No stories found for epic {config.epic}[/yellow]"
+                f"[yellow]Warning: No stories found for epic(s) "
+                f"{','.join(str(e) for e in config.epic)}[/yellow]"
             )
 
     # Apply start-from filter
@@ -522,6 +553,10 @@ def run_step(
                 errors="replace",
             )
 
+            # Restore our terminal title — subprocesses (e.g. claude CLI)
+            # may have overwritten it with their own.
+            set_running_title()
+
             # Filter out known CLI noise from stderr
             stderr = result.stderr or ""
             if config.ai_provider == "github":
@@ -592,6 +627,140 @@ def run_step(
     )
 
 
+def run_git_pull(
+    story_key: str, config: Config, merge_conflict_prompt: str
+) -> StepResult:
+    """Pull from remote and merge; invoke AI only if there are conflicts.
+
+    1. ``git pull`` — if clean, return SUCCESS.
+    2. If exit code indicates merge conflicts, invoke the AI with
+       *merge_conflict_prompt* to resolve them.
+    3. If ``git pull`` fails for any other reason, return FAILED.
+
+    Args:
+        story_key: Story identifier for logging.
+        config: Configuration with timeout, skip flags, and output settings.
+        merge_conflict_prompt: Prompt sent to the AI if conflicts occur.
+
+    Returns:
+        StepResult with status, duration, and error details if failed.
+    """
+    step_name = "git-pull"
+    start_time = time.time()
+
+    if config.skip_pull:
+        if not config.quiet:
+            console.print(
+                f"  [yellow]Skipping[/yellow] [magenta]{step_name}[/magenta]"
+            )
+        return StepResult(name=step_name, status=StepStatus.SKIPPED)
+
+    if config.dry_run:
+        console.print(
+            f"  [dim][DRY-RUN][/dim] Would run: [magenta]{step_name}[/magenta]"
+            f" (Story {story_key})"
+        )
+        return StepResult(name=step_name, status=StepStatus.SKIPPED, duration=0.0)
+
+    if not config.quiet:
+        console.print(f"  [dim]Running[/dim] [magenta]{step_name}[/magenta]...")
+
+    log_to_file(f"Running {step_name} for {story_key}", config)
+
+    try:
+        pull = subprocess.run(
+            "git pull",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        if pull.stdout:
+            log_to_file(f"git pull STDOUT:\n{pull.stdout}", config)
+        if pull.stderr:
+            log_to_file(f"git pull STDERR:\n{pull.stderr}", config)
+
+        if pull.returncode == 0:
+            duration = time.time() - start_time
+            log_to_file(f"SUCCESS: {step_name} ({format_duration(duration)})", config)
+            return StepResult(
+                name=step_name, status=StepStatus.SUCCESS, duration=duration
+            )
+
+        # Check for merge conflicts
+        has_conflicts = False
+        combined = (pull.stdout or "") + (pull.stderr or "")
+        if "CONFLICT" in combined or "merge conflict" in combined.lower():
+            has_conflicts = True
+        else:
+            # Also check git status for unmerged paths
+            status_check = subprocess.run(
+                "git status --porcelain",
+                shell=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if any(
+                line.startswith("UU ") or line.startswith("AA ")
+                for line in (status_check.stdout or "").splitlines()
+            ):
+                has_conflicts = True
+
+        if has_conflicts:
+            console.print(
+                f"  [yellow]Merge conflicts detected — "
+                f"invoking AI to resolve...[/yellow]"
+            )
+            log_to_file("Merge conflicts detected, invoking AI", config)
+            ai = config.ai_command
+            resolve_cmd = f'{ai} "{merge_conflict_prompt}"'
+            resolve_result = run_step(
+                "git-pull-resolve", resolve_cmd, story_key, config
+            )
+            # Return under the canonical step name so the summary is consistent
+            return StepResult(
+                name=step_name,
+                status=resolve_result.status,
+                duration=resolve_result.duration,
+                error=resolve_result.error,
+            )
+
+        # Non-conflict failure
+        error = (pull.stderr or "").strip() or f"Exit code: {pull.returncode}"
+        log_to_file(f"FAILED: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name,
+            status=StepStatus.FAILED,
+            error=error,
+            duration=time.time() - start_time,
+        )
+
+    except subprocess.TimeoutExpired:
+        error = "git pull timed out after 120s"
+        log_to_file(f"TIMEOUT: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name,
+            status=StepStatus.FAILED,
+            error=error,
+            duration=time.time() - start_time,
+        )
+
+    except Exception as e:
+        error = str(e)
+        log_to_file(f"ERROR: {step_name} - {error}", config)
+        return StepResult(
+            name=step_name,
+            status=StepStatus.FAILED,
+            error=error,
+            duration=time.time() - start_time,
+        )
+
+
 def process_story(
     story_key: str, config: Config, story_status: str = ""
 ) -> StoryResult:
@@ -603,6 +772,7 @@ def process_story(
     2. dev-story: Implement the story following the markdown spec
     3. code-review: Review implementation and auto-fix issues
     4. git-commit: Commit and push changes
+    5. git-pull: Pull and merge remote changes
 
     Steps are auto-skipped based on story status:
     - in-review: skips create-story and dev-story (only review + commit)
@@ -658,6 +828,12 @@ def process_story(
     commit_prompt = (
         f"Commit all changes for story {story_key} with a descriptive "
         "message. Then push to the current branch. Do not forget submodules"
+    )
+    merge_conflict_prompt = (
+        "There are git merge conflicts after pulling from the remote. "
+        "Resolve ALL merge conflicts in the working tree using best judgment, "
+        "then stage the resolved files, commit the merge, and push. "
+        "Do not ask clarifying questions."
     )
 
     # Auto-skip steps based on story status
@@ -723,6 +899,15 @@ def process_story(
             failed_step = step_name
             break
 
+    # git-pull: direct subprocess, only invoke AI if merge conflicts arise
+    if not failed_step and not _interrupted:
+        pull_result = run_git_pull(
+            story_key, config, merge_conflict_prompt
+        )
+        steps.append(pull_result)
+        if pull_result.status == StepStatus.FAILED:
+            failed_step = "git-pull"
+
     duration = time.time() - start_time
 
     # Determine overall status
@@ -745,6 +930,71 @@ def process_story(
         duration=duration,
         failed_step=failed_step,
     )
+
+
+def parse_epic_list(value: str) -> list[int]:
+    """Parse a comma-separated string of epic numbers into a sorted list of ints.
+
+    Args:
+        value: Comma-separated epic numbers (e.g., "3" or "3,4,5") or empty string.
+
+    Returns:
+        Sorted list of unique epic numbers, or empty list if input is empty.
+
+    Raises:
+        typer.Exit: If any value is not a valid positive integer.
+    """
+    if not value.strip():
+        return []
+    result: list[int] = []
+    for part in value.split(","):
+        part = part.strip()
+        try:
+            n = int(part)
+            if n <= 0:
+                raise ValueError
+            result.append(n)
+        except ValueError:
+            console.print(
+                f"[red]Error: Invalid epic number '{part}' — "
+                f"must be a positive integer[/red]"
+            )
+            raise typer.Exit(2)
+    return sorted(set(result))
+
+
+def is_epic_complete(epic_num: int, config: Config) -> bool:
+    """Check whether all stories for a given epic have status 'done'.
+
+    Unlike get_epics_needing_retro, this does NOT check the retrospective
+    status — it only looks at whether every story in the epic is finished.
+
+    Args:
+        epic_num: Epic number to check.
+        config: Configuration containing the sprint_status file path.
+
+    Returns:
+        True if the epic has stories and all of them are 'done'.
+    """
+    if not config.sprint_status.exists():
+        return False
+
+    with open(config.sprint_status, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not data or "development_status" not in data:
+        return False
+
+    dev_status = data["development_status"]
+    epic_prefix = f"{epic_num}-"
+    story_pattern = re.compile(r"^\d+-\d+-.+$")
+
+    statuses = [
+        status
+        for key, status in dev_status.items()
+        if key.startswith(epic_prefix) and story_pattern.match(key)
+    ]
+    return len(statuses) > 0 and all(s == "done" for s in statuses)
 
 
 def get_epics_needing_retro(config: Config) -> list[int]:
@@ -988,6 +1238,163 @@ def run_next_epic_preparation(
     return run_step(step_name, command, f"epic-{next_epic}", config)
 
 
+def run_after_epic_pipeline(
+    epic_num: int,
+    config: Config,
+    retro_results: list[StepResult],
+    *,
+    require_retro_success: bool = False,
+    progress: Progress | None = None,
+    progress_task: TaskID | None = None,
+) -> None:
+    """Run the full after-epic pipeline for a single epic.
+
+    Steps: retrospective -> course-correction -> retro-implementation
+    -> next-epic-preparation.  Each step respects its own skip flag.
+
+    When *require_retro_success* is True (used in the automatic in-story
+    pipeline), steps after retro only run if the retro succeeded.
+    When False (used for --after-epic), every non-skipped step runs
+    independently.
+
+    Args:
+        epic_num: The epic number to process.
+        config: Configuration with skip flags, timeout, retries, etc.
+        retro_results: Mutable list to which step results are appended.
+        require_retro_success: Gate later steps on retro success.
+        progress: Optional Rich Progress instance for status updates.
+        progress_task: Optional task ID within the Progress instance.
+    """
+    retro_ok = True  # assume success unless we actually run and fail
+
+    # 1. Retrospective
+    if not _interrupted and not config.skip_retro:
+        if progress and progress_task is not None:
+            progress.update(
+                progress_task,
+                description=f"[cyan]Epic {epic_num}: retrospective",
+            )
+        retro_result = run_retrospective(epic_num, config)
+        retro_results.append(retro_result)
+        retro_ok = retro_result.status == StepStatus.SUCCESS
+
+        if retro_result.status == StepStatus.SUCCESS:
+            console.print(
+                f"  [green]OK[/green] retro-epic-{epic_num}"
+                f"  [dim]{format_duration(retro_result.duration)}[/dim]"
+            )
+        elif retro_result.status == StepStatus.FAILED:
+            console.print(
+                f"  [red]XX[/red] retro-epic-{epic_num}"
+                f"  [dim]{retro_result.error}[/dim]"
+            )
+
+    # 2. Course correction
+    if not _interrupted and not config.skip_course_correct and (
+        not require_retro_success or retro_ok
+    ):
+        if progress and progress_task is not None:
+            progress.update(
+                progress_task,
+                description=f"[cyan]Epic {epic_num}: course correction",
+            )
+        console.print(
+            f"\n  [cyan]Running scrum-master course "
+            f"correction for epic {epic_num}...[/cyan]"
+        )
+        log_to_file(
+            f"Running course correction for epic {epic_num}",
+            config,
+        )
+        cc_result = run_course_correction(epic_num, config)
+        retro_results.append(cc_result)
+
+        if cc_result.status == StepStatus.SUCCESS:
+            console.print(
+                f"  [green]OK[/green] "
+                f"course-correct-epic-{epic_num}"
+                f"  [dim]{format_duration(cc_result.duration)}[/dim]"
+            )
+        elif cc_result.status == StepStatus.FAILED:
+            console.print(
+                f"  [red]XX[/red] "
+                f"course-correct-epic-{epic_num}"
+                f"  [dim]{cc_result.error}[/dim]"
+            )
+
+    # 3. Retro implementation
+    if not _interrupted and not config.skip_retro_impl and (
+        not require_retro_success or retro_ok
+    ):
+        if progress and progress_task is not None:
+            progress.update(
+                progress_task,
+                description=f"[cyan]Epic {epic_num}: retro implementation",
+            )
+        console.print(
+            f"\n  [cyan]Implementing retro learnings "
+            f"for epic {epic_num}...[/cyan]"
+        )
+        log_to_file(
+            f"Implementing retro learnings for epic {epic_num}",
+            config,
+        )
+        impl_result = run_retro_implementation(epic_num, config)
+        retro_results.append(impl_result)
+
+        if impl_result.status == StepStatus.SUCCESS:
+            console.print(
+                f"  [green]OK[/green] "
+                f"retro-impl-epic-{epic_num}"
+                f"  [dim]{format_duration(impl_result.duration)}[/dim]"
+            )
+        elif impl_result.status == StepStatus.FAILED:
+            console.print(
+                f"  [red]XX[/red] "
+                f"retro-impl-epic-{epic_num}"
+                f"  [dim]{impl_result.error}[/dim]"
+            )
+
+    # 4. Next epic preparation (only if next epic exists)
+    if (
+        not _interrupted
+        and not config.skip_next_epic_prep
+        and (not require_retro_success or retro_ok)
+        and has_next_epic(epic_num, config)
+    ):
+        next_epic = epic_num + 1
+        if progress and progress_task is not None:
+            progress.update(
+                progress_task,
+                description=f"[cyan]Epic {next_epic}: preparation",
+            )
+        console.print(
+            f"\n  [cyan]Preparing next epic "
+            f"{next_epic} (based on epic "
+            f"{epic_num})...[/cyan]"
+        )
+        log_to_file(
+            f"Preparing next epic {next_epic} "
+            f"after epic {epic_num}",
+            config,
+        )
+        prep_result = run_next_epic_preparation(epic_num, config)
+        retro_results.append(prep_result)
+
+        if prep_result.status == StepStatus.SUCCESS:
+            console.print(
+                f"  [green]OK[/green] "
+                f"prep-next-epic-{next_epic}"
+                f"  [dim]{format_duration(prep_result.duration)}[/dim]"
+            )
+        elif prep_result.status == StepStatus.FAILED:
+            console.print(
+                f"  [red]XX[/red] "
+                f"prep-next-epic-{next_epic}"
+                f"  [dim]{prep_result.error}[/dim]"
+            )
+
+
 def print_story_summary(result: StoryResult, config: Config) -> None:
     """
     Print a formatted summary of a completed story to the console.
@@ -1072,6 +1479,8 @@ def print_dry_run_preview(stories: list[str], config: Config) -> None:
         steps_enabled.append("code-review")
     if not config.skip_commit:
         steps_enabled.append("git-commit")
+    if not config.skip_pull:
+        steps_enabled.append("git-pull")
     table.add_row("Steps", " -> ".join(steps_enabled))
 
     console.print(table)
@@ -1114,6 +1523,8 @@ def confirm_start(stories: list[str], config: Config) -> bool:
         steps_enabled.append("code-review")
     if not config.skip_commit:
         steps_enabled.append("git-commit")
+    if not config.skip_pull:
+        steps_enabled.append("git-pull")
     console.print(f"  Steps: {' -> '.join(steps_enabled)}")
     console.print(f"  Log file: {config.log_file}")
     console.print()
@@ -1254,9 +1665,11 @@ def main(
     ] = False,
     # Story selection
     epic: Annotated[
-        int,
-        typer.Option(help="Only process stories for this epic number (e.g., --epic 3)"),
-    ] = 0,
+        str,
+        typer.Option(
+            help="Only process stories for these epic numbers, comma-separated (e.g., --epic 3 or --epic 3,4,5)"
+        ),
+    ] = "",
     limit: Annotated[
         int,
         typer.Option(help="Process at most N stories (0 = unlimited)"),
@@ -1281,6 +1694,10 @@ def main(
     skip_commit: Annotated[
         bool,
         typer.Option("--skip-commit", help="Skip git commit/push step"),
+    ] = False,
+    skip_pull: Annotated[
+        bool,
+        typer.Option("--skip-pull", help="Skip git pull/merge step after commit"),
     ] = False,
     skip_retro: Annotated[
         bool,
@@ -1310,6 +1727,17 @@ def main(
             help="Skip preparation tasks for the next epic after retro implementation",
         ),
     ] = False,
+    after_epic: Annotated[
+        str,
+        typer.Option(
+            "--after-epic",
+            help=(
+                "Explicitly run all after-epic steps (retro, course-correct, "
+                "retro-impl, next-epic-prep) for these epic numbers, "
+                "comma-separated (e.g., --after-epic 3 or --after-epic 3,4)"
+            ),
+        ),
+    ] = "",
     # Retry/Timeout
     retries: Annotated[
         int,
@@ -1359,7 +1787,7 @@ def main(
     Automated BMAD Workflow Orchestrator.
 
     Process stories through the BMAD workflow cycle:
-    create-story -> dev-story -> code-review -> git-commit
+    create-story -> dev-story -> code-review -> git-commit -> git-pull
 
     Uses Claude CLI (default) or GitHub Copilot CLI to execute each step
     autonomously. Prompts reference the BMAD workflow files in the project's
@@ -1376,6 +1804,12 @@ def main(
         # Process all stories in epic 3
         bmad-automate --epic 3
 
+        # Process stories in epics 3 and 4
+        bmad-automate --epic 3,4
+
+        # Run after-epic steps (retro, course-correct, etc.) for epic 3
+        bmad-automate --after-epic 3
+
         # Process single story
         bmad-automate 3-3-account-translation
 
@@ -1391,6 +1825,9 @@ def main(
     global _results, _start_time, _config
 
     # Build config from CLI arguments
+    epic_list = parse_epic_list(epic)
+    after_epic_list = parse_epic_list(after_epic)
+
     config = Config(
         sprint_status=sprint_status,
         story_dir=story_dir,
@@ -1402,11 +1839,13 @@ def main(
         limit=limit,
         start_from=start_from,
         specific_stories=stories or [],
-        epic=epic,
+        epic=epic_list,
+        after_epic=after_epic_list,
         skip_create=skip_create,
         skip_dev=skip_dev,
         skip_review=skip_review,
         skip_commit=skip_commit,
+        skip_pull=skip_pull,
         skip_retro=skip_retro,
         skip_course_correct=skip_course_correct,
         skip_retro_impl=skip_retro_impl,
@@ -1448,7 +1887,26 @@ def main(
     if not config.skip_retro:
         pending_retro_epics = get_epics_needing_retro(config)
 
-    if not total_actionable and not config.specific_stories and not pending_retro_epics:
+    # When --epic is used and those epics are fully complete, automatically
+    # include them in the after-epic pipeline so the user doesn't have to
+    # separately pass --after-epic.
+    after_epic_epics: list[int] = list(config.after_epic)
+    if config.epic:
+        for e in config.epic:
+            if (
+                e not in after_epic_epics
+                and e not in pending_retro_epics
+                and is_epic_complete(e, config)
+            ):
+                after_epic_epics.append(e)
+        after_epic_epics = sorted(set(after_epic_epics))
+
+    if (
+        not total_actionable
+        and not config.specific_stories
+        and not pending_retro_epics
+        and not after_epic_epics
+    ):
         console.print(
             "[yellow]No actionable stories or pending retrospectives found "
             "in sprint-status.yaml[/yellow]"
@@ -1463,7 +1921,7 @@ def main(
 
     filtered_stories = filter_stories(stories_by_status, config)
 
-    if not filtered_stories and not pending_retro_epics:
+    if not filtered_stories and not pending_retro_epics and not after_epic_epics:
         console.print(
             "[yellow]No stories to process after applying filters "
             "and no pending retrospectives[/yellow]"
@@ -1472,24 +1930,35 @@ def main(
 
     # Dry run mode
     if config.dry_run:
-        # Show pending retrospective pipeline FIRST (they run before stories)
-        if pending_retro_epics:
+        # Show after-epic pipeline (explicit --after-epic or auto-detected from --epic)
+        # Uses run_after_epic_pipeline so dry-run output matches real execution logic.
+        if after_epic_epics:
             console.print(
-                "[bold]Pending retrospective pipeline "
-                "(will run before stories):[/bold]"
+                "[bold]After-epic pipeline for "
+                f"epic(s) {','.join(str(e) for e in after_epic_epics)}:[/bold]"
             )
-            for epic_num in pending_retro_epics:
-                run_retrospective(epic_num, config)
-                if not config.skip_course_correct:
-                    run_course_correction(epic_num, config)
-                if not config.skip_retro_impl:
-                    run_retro_implementation(epic_num, config)
-                if (
-                    not config.skip_next_epic_prep
-                    and has_next_epic(epic_num, config)
-                ):
-                    run_next_epic_preparation(epic_num, config)
+            _dry_results: list[StepResult] = []
+            for epic_num in after_epic_epics:
+                run_after_epic_pipeline(epic_num, config, _dry_results)
             console.print()
+
+        # Show pending retrospective pipeline (they run before stories)
+        if pending_retro_epics:
+            auto_retro_epics = [
+                e for e in pending_retro_epics if e not in after_epic_epics
+            ]
+            if auto_retro_epics:
+                console.print(
+                    "[bold]Pending retrospective pipeline "
+                    "(will run before stories):[/bold]"
+                )
+                _dry_results2: list[StepResult] = []
+                for epic_num in auto_retro_epics:
+                    run_after_epic_pipeline(
+                        epic_num, config, _dry_results2,
+                        require_retro_success=True,
+                    )
+                console.print()
 
         # Then show what story steps would run
         if filtered_stories:
@@ -1509,6 +1978,12 @@ def main(
         if not confirm_start(filtered_stories, config):
             raise typer.Exit(0)
 
+    # Set running indicator in terminal title (after dry-run/confirmation gates).
+    # Register cleanup via atexit so the title is restored even if an unhandled
+    # exception or SIGTERM causes an early exit (SIGKILL cannot be caught).
+    set_running_title()
+    atexit.register(restore_terminal_title, success=False)
+
     # Initialize log file
     log_to_file("=" * 50, config)
     log_to_file("BMAD Automation Started", config)
@@ -1520,123 +1995,41 @@ def main(
     retro_results: list[StepResult] = []
     retro_done_epics: set[int] = set()
 
+    # Run explicit --after-epic pipeline FIRST
+    if after_epic_epics and not _interrupted:
+        for epic_num in after_epic_epics:
+            if _interrupted:
+                break
+            retro_done_epics.add(epic_num)
+            console.print(
+                f"\n  [cyan]Running after-epic pipeline for "
+                f"epic {epic_num}...[/cyan]"
+            )
+            log_to_file(
+                f"Running after-epic pipeline for epic {epic_num}",
+                config,
+            )
+            run_after_epic_pipeline(epic_num, config, retro_results)
+
     # Run any already-pending retrospective pipelines BEFORE processing stories
     if pending_retro_epics and not _interrupted:
         for epic_num in pending_retro_epics:
             if _interrupted:
                 break
+            if epic_num in retro_done_epics:
+                continue  # Already handled by --after-epic
             retro_done_epics.add(epic_num)
             console.print(
                 f"\n  [cyan]Epic {epic_num} already complete — "
-                f"running retrospective pipeline first...[/cyan]"
+                f"running after-epic pipeline...[/cyan]"
             )
             log_to_file(
-                f"Running pending retrospective for epic {epic_num}",
+                f"Running pending after-epic pipeline for epic {epic_num}",
                 config,
             )
-            retro_result = run_retrospective(epic_num, config)
-            retro_results.append(retro_result)
-
-            if retro_result.status == StepStatus.SUCCESS:
-                console.print(
-                    f"  [green]OK[/green] retro-epic-{epic_num}"
-                    f"  [dim]{format_duration(retro_result.duration)}[/dim]"
-                )
-            elif retro_result.status == StepStatus.FAILED:
-                console.print(
-                    f"  [red]XX[/red] retro-epic-{epic_num}"
-                    f"  [dim]{retro_result.error}[/dim]"
-                )
-
-            if (
-                not config.skip_course_correct
-                and retro_result.status == StepStatus.SUCCESS
-            ):
-                console.print(
-                    f"\n  [cyan]Running scrum-master course "
-                    f"correction for epic {epic_num}...[/cyan]"
-                )
-                log_to_file(
-                    f"Running course correction for epic {epic_num}",
-                    config,
-                )
-                cc_result = run_course_correction(epic_num, config)
-                retro_results.append(cc_result)
-
-                if cc_result.status == StepStatus.SUCCESS:
-                    console.print(
-                        f"  [green]OK[/green] "
-                        f"course-correct-epic-{epic_num}"
-                        f"  [dim]{format_duration(cc_result.duration)}[/dim]"
-                    )
-                elif cc_result.status == StepStatus.FAILED:
-                    console.print(
-                        f"  [red]XX[/red] "
-                        f"course-correct-epic-{epic_num}"
-                        f"  [dim]{cc_result.error}[/dim]"
-                    )
-
-            if (
-                not config.skip_retro_impl
-                and retro_result.status == StepStatus.SUCCESS
-            ):
-                console.print(
-                    f"\n  [cyan]Implementing retro learnings "
-                    f"for epic {epic_num}...[/cyan]"
-                )
-                log_to_file(
-                    f"Implementing retro learnings for epic {epic_num}",
-                    config,
-                )
-                impl_result = run_retro_implementation(epic_num, config)
-                retro_results.append(impl_result)
-
-                if impl_result.status == StepStatus.SUCCESS:
-                    console.print(
-                        f"  [green]OK[/green] "
-                        f"retro-impl-epic-{epic_num}"
-                        f"  [dim]{format_duration(impl_result.duration)}[/dim]"
-                    )
-                elif impl_result.status == StepStatus.FAILED:
-                    console.print(
-                        f"  [red]XX[/red] "
-                        f"retro-impl-epic-{epic_num}"
-                        f"  [dim]{impl_result.error}[/dim]"
-                    )
-
-            if (
-                not config.skip_next_epic_prep
-                and retro_result.status == StepStatus.SUCCESS
-                and has_next_epic(epic_num, config)
-            ):
-                next_epic = epic_num + 1
-                console.print(
-                    f"\n  [cyan]Preparing next epic "
-                    f"{next_epic} (based on epic "
-                    f"{epic_num})...[/cyan]"
-                )
-                log_to_file(
-                    f"Preparing next epic {next_epic} "
-                    f"after epic {epic_num}",
-                    config,
-                )
-                prep_result = run_next_epic_preparation(
-                    epic_num, config
-                )
-                retro_results.append(prep_result)
-
-                if prep_result.status == StepStatus.SUCCESS:
-                    console.print(
-                        f"  [green]OK[/green] "
-                        f"prep-next-epic-{next_epic}"
-                        f"  [dim]{format_duration(prep_result.duration)}[/dim]"
-                    )
-                elif prep_result.status == StepStatus.FAILED:
-                    console.print(
-                        f"  [red]XX[/red] "
-                        f"prep-next-epic-{next_epic}"
-                        f"  [dim]{prep_result.error}[/dim]"
-                    )
+            run_after_epic_pipeline(
+                epic_num, config, retro_results, require_retro_success=True
+            )
 
     # Process stories with progress
     if filtered_stories:
@@ -1688,159 +2081,22 @@ def main(
                     for epic_num in epics:
                         if epic_num not in retro_done_epics:
                             retro_done_epics.add(epic_num)
-                            progress.update(
-                                task,
-                                description=(
-                                    f"[cyan]Epic {epic_num}: retrospective"
-                                ),
-                            )
                             console.print(
                                 f"\n  [cyan]Epic {epic_num} complete — "
-                                f"running retrospective...[/cyan]"
+                                f"running after-epic pipeline...[/cyan]"
                             )
                             log_to_file(
-                                f"Running retrospective for epic {epic_num}",
+                                f"Running after-epic pipeline for epic {epic_num}",
                                 config,
                             )
-                            retro_result = run_retrospective(epic_num, config)
-                            retro_results.append(retro_result)
-
-                            if retro_result.status == StepStatus.SUCCESS:
-                                console.print(
-                                    f"  [green]OK[/green] retro-epic-{epic_num}"
-                                    f"  [dim]{format_duration(retro_result.duration)}"
-                                    f"[/dim]"
-                                )
-                            elif retro_result.status == StepStatus.FAILED:
-                                console.print(
-                                    f"  [red]XX[/red] retro-epic-{epic_num}"
-                                    f"  [dim]{retro_result.error}[/dim]"
-                                )
-
-                            # Run course correction after successful retro
-                            if (
-                                not config.skip_course_correct
-                                and retro_result.status == StepStatus.SUCCESS
-                            ):
-                                progress.update(
-                                    task,
-                                    description=(
-                                        f"[cyan]Epic {epic_num}: "
-                                        f"course correction"
-                                    ),
-                                )
-                                console.print(
-                                    f"\n  [cyan]Running scrum-master course "
-                                    f"correction for epic {epic_num}...[/cyan]"
-                                )
-                                log_to_file(
-                                    f"Running course correction for epic {epic_num}",
-                                    config,
-                                )
-                                cc_result = run_course_correction(
-                                    epic_num, config
-                                )
-                                retro_results.append(cc_result)
-
-                                if cc_result.status == StepStatus.SUCCESS:
-                                    console.print(
-                                        f"  [green]OK[/green] "
-                                        f"course-correct-epic-{epic_num}"
-                                        f"  [dim]"
-                                        f"{format_duration(cc_result.duration)}"
-                                        f"[/dim]"
-                                    )
-                                elif cc_result.status == StepStatus.FAILED:
-                                    console.print(
-                                        f"  [red]XX[/red] "
-                                        f"course-correct-epic-{epic_num}"
-                                        f"  [dim]{cc_result.error}[/dim]"
-                                    )
-
-                            # Implement retro learnings after course correction
-                            if (
-                                not config.skip_retro_impl
-                                and retro_result.status == StepStatus.SUCCESS
-                            ):
-                                progress.update(
-                                    task,
-                                    description=(
-                                        f"[cyan]Epic {epic_num}: "
-                                        f"retro implementation"
-                                    ),
-                                )
-                                console.print(
-                                    f"\n  [cyan]Implementing retro learnings "
-                                    f"for epic {epic_num}...[/cyan]"
-                                )
-                                log_to_file(
-                                    f"Implementing retro learnings for "
-                                    f"epic {epic_num}",
-                                    config,
-                                )
-                                impl_result = run_retro_implementation(
-                                    epic_num, config
-                                )
-                                retro_results.append(impl_result)
-
-                                if impl_result.status == StepStatus.SUCCESS:
-                                    console.print(
-                                        f"  [green]OK[/green] "
-                                        f"retro-impl-epic-{epic_num}"
-                                        f"  [dim]"
-                                        f"{format_duration(impl_result.duration)}"
-                                        f"[/dim]"
-                                    )
-                                elif impl_result.status == StepStatus.FAILED:
-                                    console.print(
-                                        f"  [red]XX[/red] "
-                                        f"retro-impl-epic-{epic_num}"
-                                        f"  [dim]{impl_result.error}[/dim]"
-                                    )
-
-                            # Prepare next epic if it exists
-                            if (
-                                not config.skip_next_epic_prep
-                                and retro_result.status == StepStatus.SUCCESS
-                                and has_next_epic(epic_num, config)
-                            ):
-                                next_epic = epic_num + 1
-                                progress.update(
-                                    task,
-                                    description=(
-                                        f"[cyan]Epic {next_epic}: "
-                                        f"preparation"
-                                    ),
-                                )
-                                console.print(
-                                    f"\n  [cyan]Preparing next epic "
-                                    f"{next_epic} (based on epic "
-                                    f"{epic_num})...[/cyan]"
-                                )
-                                log_to_file(
-                                    f"Preparing next epic {next_epic} "
-                                    f"after epic {epic_num}",
-                                    config,
-                                )
-                                prep_result = run_next_epic_preparation(
-                                    epic_num, config
-                                )
-                                retro_results.append(prep_result)
-
-                                if prep_result.status == StepStatus.SUCCESS:
-                                    console.print(
-                                        f"  [green]OK[/green] "
-                                        f"prep-next-epic-{next_epic}"
-                                        f"  [dim]"
-                                        f"{format_duration(prep_result.duration)}"
-                                        f"[/dim]"
-                                    )
-                                elif prep_result.status == StepStatus.FAILED:
-                                    console.print(
-                                        f"  [red]XX[/red] "
-                                        f"prep-next-epic-{next_epic}"
-                                        f"  [dim]{prep_result.error}[/dim]"
-                                    )
+                            run_after_epic_pipeline(
+                                epic_num,
+                                config,
+                                retro_results,
+                                require_retro_success=True,
+                                progress=progress,
+                                progress_task=task,
+                            )
 
     # Final summary
     total_duration = time.time() - _start_time
@@ -1851,8 +2107,14 @@ def main(
     log_to_file(f"Duration: {format_duration(total_duration)}", config)
     log_to_file("=" * 50, config)
 
+    # Restore terminal title with status indicator.
+    # Unregister the atexit fallback first so it doesn't fire a second time.
+    has_failures = any(r.status == StoryStatus.FAILED for r in _results)
+    atexit.unregister(restore_terminal_title)
+    restore_terminal_title(success=not has_failures and not _interrupted)
+
     # Exit code
-    if any(r.status == StoryStatus.FAILED for r in _results):
+    if has_failures:
         raise typer.Exit(1)
     elif _interrupted:
         raise typer.Exit(130)
