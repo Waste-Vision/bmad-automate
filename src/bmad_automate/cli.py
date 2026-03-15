@@ -627,6 +627,39 @@ def run_step(
     )
 
 
+def mark_story_done(story_key: str, config: Config) -> None:
+    """Update a story's status to 'done' in sprint-status.yaml.
+
+    Called by the orchestrator after all steps for a story complete
+    successfully, so the after-epic pipeline can detect epic completion
+    without relying on the AI workflow to update the yaml.
+
+    Args:
+        story_key: Story identifier (e.g., '3-3-account-translation').
+        config: Configuration containing the sprint_status file path.
+    """
+    if not config.sprint_status.exists():
+        return
+
+    with open(config.sprint_status, encoding="utf-8") as f:
+        raw = f.read()
+
+    # Use a targeted regex replacement to preserve comments and formatting.
+    # Match the story key followed by a colon and any status value.
+    pattern = re.compile(
+        rf"^(\s*{re.escape(story_key)}\s*:\s*)(\S+)(.*)$", re.MULTILINE
+    )
+    match = pattern.search(raw)
+    if not match or match.group(2) == "done":
+        return  # already done or key not found
+
+    updated = pattern.sub(r"\g<1>done\g<3>", raw)
+    with open(config.sprint_status, "w", encoding="utf-8") as f:
+        f.write(updated)
+
+    log_to_file(f"Marked {story_key} as done in sprint-status.yaml", config)
+
+
 def run_git_pull(
     story_key: str, config: Config, merge_conflict_prompt: str
 ) -> StepResult:
@@ -917,6 +950,9 @@ def process_story(
         status = StoryStatus.SKIPPED
     else:
         status = StoryStatus.COMPLETED
+        # Mark the story as done in sprint-status.yaml so the after-epic
+        # pipeline can reliably detect epic completion.
+        mark_story_done(story_key, config)
 
     log_to_file(
         f"=== Story {story_key}: {status.value} ({format_duration(duration)}) ===",
