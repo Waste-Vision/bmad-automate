@@ -717,10 +717,33 @@ def run_git_pull(
             log_to_file(f"git pull STDERR:\n{pull.stderr}", config)
 
         if pull.returncode == 0:
+            # Pull succeeded — now push
+            push = subprocess.run(
+                "git push",
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if push.stdout:
+                log_to_file(f"git push STDOUT:\n{push.stdout}", config)
+            if push.stderr:
+                log_to_file(f"git push STDERR:\n{push.stderr}", config)
+
             duration = time.time() - start_time
-            log_to_file(f"SUCCESS: {step_name} ({format_duration(duration)})", config)
+            if push.returncode == 0:
+                log_to_file(f"SUCCESS: {step_name} ({format_duration(duration)})", config)
+                return StepResult(
+                    name=step_name, status=StepStatus.SUCCESS, duration=duration
+                )
+
+            error = (push.stderr or "").strip() or f"git push exit code: {push.returncode}"
+            log_to_file(f"FAILED: {step_name} (push) - {error}", config)
             return StepResult(
-                name=step_name, status=StepStatus.SUCCESS, duration=duration
+                name=step_name, status=StepStatus.FAILED,
+                error=error, duration=duration,
             )
 
         # Check for merge conflicts
@@ -804,8 +827,8 @@ def process_story(
     1. create-story: Generate story markdown file (auto-skipped if exists)
     2. dev-story: Implement the story following the markdown spec
     3. code-review: Review implementation and auto-fix issues
-    4. git-commit: Commit and push changes
-    5. git-pull: Pull and merge remote changes
+    4. git-commit: Commit changes locally (no push)
+    5. git-pull: Pull, merge remote changes, then push
 
     Steps are auto-skipped based on story status:
     - in-review: skips create-story and dev-story (only review + commit)
@@ -860,7 +883,7 @@ def process_story(
     )
     commit_prompt = (
         f"Commit all changes for story {story_key} with a descriptive "
-        "message. Then push to the current branch. Do not forget submodules"
+        "message. Do NOT push yet. Do not forget submodules"
     )
     merge_conflict_prompt = (
         "There are git merge conflicts after pulling from the remote. "
@@ -888,7 +911,8 @@ def process_story(
             console.print("  [dim]Story file exists, skipping create-story[/dim]")
         skip_create = True
 
-    # Define steps – each invokes the configured AI CLI
+    # Define steps -- each invokes the configured AI CLI
+    # Order: create -> dev -> review -> commit (local) -> pull+push
     step_definitions = [
         (
             "create-story",
