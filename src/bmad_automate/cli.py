@@ -1474,10 +1474,11 @@ def run_after_epic_pipeline(
 
 
 def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
-    """Commit and push any changes produced by the after-epic pipeline.
+    """Commit, pull, and push any changes produced by the after-epic pipeline.
 
-    Runs ``git add -A && git commit && git push`` directly.  If there are
-    no changes to commit the step is reported as SUCCESS (nothing to do).
+    Runs ``git add -A && git commit`` locally, then ``git pull`` to merge
+    remote changes, then ``git push``.  If there are no changes to commit
+    the step is reported as SUCCESS (nothing to do).
 
     Args:
         epic_num: Epic number (used in the commit message).
@@ -1512,13 +1513,13 @@ def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
                 name=step_name, status=StepStatus.SUCCESS, duration=duration
             )
 
-        cmd = (
+        # 1. Commit locally
+        commit_cmd = (
             'git add -A && git commit -m '
-            f'"after-epic: retro and prep for epic {epic_num}" '
-            '&& git push'
+            f'"after-epic: retro and prep for epic {epic_num}"'
         )
-        result = subprocess.run(
-            cmd,
+        commit = subprocess.run(
+            commit_cmd,
             shell=True,
             capture_output=True,
             text=True,
@@ -1526,21 +1527,66 @@ def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
             encoding="utf-8",
             errors="replace",
         )
+        if commit.stdout:
+            log_to_file(f"commit STDOUT:\n{commit.stdout}", config)
+        if commit.stderr:
+            log_to_file(f"commit STDERR:\n{commit.stderr}", config)
 
-        if result.stdout:
-            log_to_file(f"STDOUT:\n{result.stdout}", config)
-        if result.stderr:
-            log_to_file(f"STDERR:\n{result.stderr}", config)
+        if commit.returncode != 0:
+            error = (commit.stderr or "").strip() or f"git commit exit code: {commit.returncode}"
+            log_to_file(f"FAILED: {step_name} (commit) - {error}", config)
+            return StepResult(
+                name=step_name, status=StepStatus.FAILED,
+                error=error, duration=time.time() - start_time,
+            )
+
+        # 2. Pull and merge
+        pull = subprocess.run(
+            "git pull",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if pull.stdout:
+            log_to_file(f"pull STDOUT:\n{pull.stdout}", config)
+        if pull.stderr:
+            log_to_file(f"pull STDERR:\n{pull.stderr}", config)
+
+        if pull.returncode != 0:
+            error = (pull.stderr or "").strip() or f"git pull exit code: {pull.returncode}"
+            log_to_file(f"FAILED: {step_name} (pull) - {error}", config)
+            return StepResult(
+                name=step_name, status=StepStatus.FAILED,
+                error=error, duration=time.time() - start_time,
+            )
+
+        # 3. Push
+        push = subprocess.run(
+            "git push",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if push.stdout:
+            log_to_file(f"push STDOUT:\n{push.stdout}", config)
+        if push.stderr:
+            log_to_file(f"push STDERR:\n{push.stderr}", config)
 
         duration = time.time() - start_time
-        if result.returncode == 0:
+        if push.returncode == 0:
             log_to_file(f"SUCCESS: {step_name} ({format_duration(duration)})", config)
             return StepResult(
                 name=step_name, status=StepStatus.SUCCESS, duration=duration
             )
 
-        error = (result.stderr or "").strip() or f"Exit code: {result.returncode}"
-        log_to_file(f"FAILED: {step_name} - {error}", config)
+        error = (push.stderr or "").strip() or f"git push exit code: {push.returncode}"
+        log_to_file(f"FAILED: {step_name} (push) - {error}", config)
         return StepResult(
             name=step_name, status=StepStatus.FAILED,
             error=error, duration=duration,
