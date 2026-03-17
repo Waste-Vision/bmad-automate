@@ -157,7 +157,7 @@ class TestHistoryEndpoint:
     async def test_empty_history(self, client):
         resp = await client.get("/api/v1/history")
         assert resp.status_code == 200
-        assert resp.json() == {"runs": []}
+        assert resp.json() == {"runs": [], "patterns": []}
 
     async def test_reads_existing_history(self, client, project_dir: Path):
         history = project_dir / "runs.json"

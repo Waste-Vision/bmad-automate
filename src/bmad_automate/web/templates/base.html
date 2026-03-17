@@ -11,30 +11,39 @@
         nav { margin-bottom: 0; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
+        /* Tab bar — hover + bold active */
         .tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--pico-muted-border-color); }
-        .tab-bar button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 0.5rem 1rem; cursor: pointer; margin-bottom: -2px; }
-        .tab-bar button.active { border-bottom-color: var(--pico-primary); color: var(--pico-primary); }
+        .tab-bar button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 0.5rem 1rem; cursor: pointer; margin-bottom: -2px; transition: background 0.15s; }
+        .tab-bar button:hover { background: rgba(255,255,255,0.04); }
+        .tab-bar button.active { border-bottom-color: var(--pico-primary); color: var(--pico-primary); font-weight: 600; }
+        /* Status badges — warmer palette */
         .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
-        .status-done { background: #2d5a2d; color: #a3d9a3; }
-        .status-in-progress { background: #5a4a2d; color: #d9c9a3; }
-        .status-ready-for-dev { background: #2d3a5a; color: #a3b9d9; }
-        .status-backlog { background: #3a3a3a; color: #b0b0b0; }
-        .status-failed { background: #5a2d2d; color: #d9a3a3; }
-        .status-pending { background: #3a3a3a; color: #b0b0b0; }
+        .status-done { background: #1a3a1a; color: #81c784; }
+        .status-in-progress { background: #3a3018; color: #ffb74d; }
+        .status-ready-for-dev { background: #1e2a3d; color: #80cbc4; }
+        .status-backlog { background: #2e2e2e; color: #9e9e9e; }
+        .status-failed { background: #3d1a1a; color: #ef9a9a; }
+        .status-pending { background: #2e2e2e; color: #9e9e9e; }
+        /* Sprint board */
         .story-card { border: 1px solid var(--pico-muted-border-color); padding: 0.5rem; margin: 0.25rem 0; border-radius: 4px; }
         .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
         .board-column h4 { text-align: center; padding: 0.5rem; background: var(--pico-card-background-color); border-radius: 4px; }
-        .log-panel { background: #1a1a1a; color: #e0e0e0; padding: 1rem; font-family: monospace; font-size: 0.85em; max-height: 500px; overflow-y: auto; border-radius: 4px; }
+        .board-column h4 .count-badge { display: inline-block; background: rgba(255,255,255,0.08); padding: 0 6px; border-radius: 10px; font-size: 0.8em; margin-left: 4px; font-weight: 400; }
+        /* Log panel — neutral bg with status accent stripe */
+        .log-panel { background: #1a1a1a; color: #e0e0e0; padding: 1rem; padding-left: 1.2rem; font-family: monospace; font-size: 0.85em; max-height: 500px; overflow-y: auto; border-radius: 4px; border-left: 3px solid #4caf50; transition: border-color 0.3s; }
+        .log-panel.has-error { border-left-color: #ef5350; }
         .log-line { margin: 0; white-space: pre-wrap; word-break: break-all; }
         .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
         .controls button { padding: 0.4rem 0.8rem; font-size: 0.85em; }
         .merge-queue { margin: 1rem 0; }
         .merge-item { padding: 0.3rem 0.5rem; border-left: 3px solid var(--pico-primary); margin: 0.25rem 0; }
-        /* Dependency graph */
-        .dep-graph { background: #1a1a2e; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; }
+        /* Dependency graph — neutral bg with accent top border */
+        .dep-graph { background: #1e1e22; border-radius: 8px; border-top: 3px solid var(--pico-primary); padding: 1rem; margin: 1rem 0; overflow-x: auto; }
         .dep-graph svg { display: block; margin: 0 auto; }
         .dep-graph .legend { display: flex; gap: 1.5rem; justify-content: center; margin-top: 0.75rem; font-size: 0.8em; color: #b0b0b0; }
         .dep-graph .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+        /* Filter controls */
+        .dep-graph-controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; font-size: 0.9em; background: rgba(255,255,255,0.03); border: 1px solid var(--pico-muted-border-color); border-radius: 6px; padding: 0.5rem 1rem; margin: 0.5rem 0; }
         /* Run config form */
         .form-section { border: 1px solid var(--pico-muted-border-color); border-radius: 6px; padding: 1rem; margin: 0.75rem 0; }
         .form-section summary { cursor: pointer; font-weight: 600; margin-bottom: 0.5rem; }
@@ -57,11 +66,11 @@
         .story-progress-item:last-child { border-bottom: none; }
         .step-indicators { display: flex; gap: 0.25rem; }
         .step-dot { width: 18px; height: 18px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold; }
-        .step-dot.pending { background: #3a3a3a; color: #888; }
-        .step-dot.running { background: #5a4a2d; color: #f0ad4e; animation: pulse 1.5s infinite; }
-        .step-dot.done { background: #2d5a2d; color: #5cb85c; }
-        .step-dot.failed { background: #5a2d2d; color: #d9534f; }
-        .step-dot.skipped { background: #2a2a2a; color: #666; }
+        .step-dot.pending { background: #2e2e2e; color: #777; }
+        .step-dot.running { background: #3a3018; color: #ffb74d; animation: pulse 1.5s infinite; }
+        .step-dot.done { background: #1a3a1a; color: #4caf50; }
+        .step-dot.failed { background: #3d1a1a; color: #ef5350; }
+        .step-dot.skipped { background: #252525; color: #555; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
         .story-key { font-family: monospace; min-width: 200px; }
         .story-status-label { font-size: 0.8em; min-width: 80px; text-align: right; }
@@ -96,6 +105,18 @@
         <!-- ============================================================ -->
         <div id="tab-dashboard" class="tab-content active">
             <h3>Epic Dependencies</h3>
+            <div id="dep-graph-controls" class="dep-graph-controls">
+                <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
+                    <input type="checkbox" id="dep-show-done" onchange="applyDepGraphFilters()"> Show completed
+                </label>
+                <label style="display:flex;align-items:center;gap:0.3rem">
+                    Filter:
+                    <input type="text" id="dep-epic-filter" placeholder="e.g. 1,5,10-15"
+                           style="width:160px;padding:0.2rem 0.5rem;font-size:0.9em;">
+                </label>
+                <button onclick="applyDepGraphFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Apply</button>
+                <button class="secondary" onclick="clearDepGraphFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Reset</button>
+            </div>
             <div class="dep-graph" id="dep-graph">
                 <p style="color:#888;text-align:center">Loading dependency graph...</p>
             </div>
@@ -243,7 +264,17 @@
                     <p style="color:#888;font-size:0.9em">Waiting for stories to start...</p>
                 </div>
 
-                <div class="merge-queue" id="merge-queue"></div>
+                <!-- Active Retries -->
+                <div id="retry-panel" style="display:none">
+                    <h4>Active Retries</h4>
+                    <div id="retry-list"></div>
+                </div>
+
+                <!-- Merge Queue -->
+                <div id="merge-queue-panel" style="display:none">
+                    <h4>Merge Queue</h4>
+                    <div class="merge-queue" id="merge-queue"></div>
+                </div>
 
                 <h4>Logs</h4>
                 <div class="log-panel" id="log-output">
@@ -317,8 +348,8 @@
         <!-- ============================================================ -->
         <div id="tab-history" class="tab-content">
             <h3>Run History</h3>
-            <div hx-get="/api/v1/history" hx-trigger="revealed" hx-swap="innerHTML"
-                 id="history-table">
+            <div id="failure-patterns" style="display:none;margin-bottom:1rem"></div>
+            <div id="history-table">
                 <p>Loading...</p>
             </div>
         </div>
@@ -330,9 +361,16 @@
         // ---------------------------------------------------------------
         function showTab(name) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-            document.querySelectorAll('.tab-bar button').forEach(el => el.classList.remove('active'));
+            const buttons = document.querySelectorAll('.tab-bar button');
+            buttons.forEach(el => el.classList.remove('active'));
             document.getElementById('tab-' + name).classList.add('active');
-            event.target.classList.add('active');
+            // Activate the matching tab button — find by onclick or data attr
+            const tabMap = ['dashboard', 'run', 'after-epic', 'history'];
+            const idx = tabMap.indexOf(name);
+            if (idx >= 0 && buttons[idx]) buttons[idx].classList.add('active');
+
+            // Lazy-load history when tab is shown
+            if (name === 'history') loadHistory();
         }
 
         // ---------------------------------------------------------------
@@ -477,6 +515,17 @@
                 if (!col) return;
                 col.innerHTML = '';
                 const stories = (data.stories || {})[status] || [];
+                // Update count badge in column header
+                const header = col.parentElement.querySelector('h4');
+                if (header) {
+                    let badge = header.querySelector('.count-badge');
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'count-badge';
+                        header.appendChild(badge);
+                    }
+                    badge.textContent = stories.length;
+                }
                 stories.forEach(key => {
                     const card = document.createElement('div');
                     card.className = 'story-card';
@@ -610,8 +659,6 @@
             .then(data => {
                 // Switch to run tab to show logs
                 showTab('run');
-                document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
-                document.querySelectorAll('.tab-bar button')[1].classList.add('active');
                 showActiveRun(data.run_id, data.epics ? data.epics.map(e => `after-epic-${e}`) : []);
             })
             .catch(err => {
@@ -716,6 +763,7 @@
             if (eventSource) eventSource.close();
             const logPanel = document.getElementById('log-output');
             logPanel.innerHTML = '';
+            logPanel.classList.remove('has-error');
             eventSource = new EventSource('/api/v1/logs/' + runId);
 
             eventSource.addEventListener('log', function(e) {
@@ -724,9 +772,12 @@
                 line.className = 'log-line';
 
                 // Color-code by level
-                if (data.level === 'error') line.style.color = '#d9534f';
-                else if (data.level === 'warning') line.style.color = '#f0ad4e';
-                else if (data.level === 'success') line.style.color = '#5cb85c';
+                if (data.level === 'error') {
+                    line.style.color = '#ef5350';
+                    logPanel.classList.add('has-error');
+                }
+                else if (data.level === 'warning') line.style.color = '#ffb74d';
+                else if (data.level === 'success') line.style.color = '#4caf50';
 
                 // Prefix with epic/story context if available
                 let prefix = '';
@@ -783,6 +834,88 @@
             });
         }
 
+        // ---------------------------------------------------------------
+        // Retry panel — show active retries with Retry Now / Skip buttons
+        // ---------------------------------------------------------------
+        function updateRetryPanel(retries) {
+            const panel = document.getElementById('retry-panel');
+            const list = document.getElementById('retry-list');
+            if (!panel || !list) return;
+
+            if (!retries || retries.length === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+
+            panel.style.display = 'block';
+            list.innerHTML = '';
+
+            retries.forEach(r => {
+                const item = document.createElement('div');
+                item.className = 'merge-item';
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.gap = '0.5rem';
+
+                const info = document.createElement('span');
+                info.style.flex = '1';
+                const retryIn = r.retry_in > 0 ? ` (retrying in ${r.retry_in}s)` : '';
+                info.textContent = `[E${r.epic}] ${r.story} / ${r.step} — attempt ${r.attempt}/${r.max_retries}${retryIn}`;
+                item.appendChild(info);
+
+                if (!r.failed && !r.skipped) {
+                    const retryBtn = document.createElement('button');
+                    retryBtn.textContent = 'Retry Now';
+                    retryBtn.style.cssText = 'padding:0.2rem 0.6rem;font-size:0.8em';
+                    retryBtn.onclick = () => sendControl('retry', {epic: r.epic, story: r.story, step: r.step});
+                    item.appendChild(retryBtn);
+
+                    const skipBtn = document.createElement('button');
+                    skipBtn.textContent = 'Skip';
+                    skipBtn.className = 'secondary';
+                    skipBtn.style.cssText = 'padding:0.2rem 0.6rem;font-size:0.8em';
+                    skipBtn.onclick = () => sendControl('skip_step', {epic: r.epic, story: r.story, step: r.step});
+                    item.appendChild(skipBtn);
+                }
+
+                list.appendChild(item);
+            });
+        }
+
+        // ---------------------------------------------------------------
+        // Merge queue — show queue status during parallel runs
+        // ---------------------------------------------------------------
+        function updateMergeQueue(queue) {
+            const panel = document.getElementById('merge-queue-panel');
+            const container = document.getElementById('merge-queue');
+            if (!panel || !container) return;
+
+            if (!queue || queue.length === 0) {
+                panel.style.display = 'none';
+                return;
+            }
+
+            panel.style.display = 'block';
+            container.innerHTML = '';
+
+            const statusColors = {
+                pending: '#5bc0de', merging: '#f0ad4e', done: '#5cb85c',
+                failed: '#d9534f', aborted: '#888',
+            };
+
+            queue.forEach((item, i) => {
+                const el = document.createElement('div');
+                el.className = 'merge-item';
+                const color = statusColors[item.status] || '#888';
+                el.style.borderLeftColor = color;
+                let text = `Epic ${item.epic}: ${item.status}`;
+                if (item.status === 'pending') text += ` (position ${i + 1})`;
+                if (item.error) text += ` — ${item.error}`;
+                el.textContent = text;
+                container.appendChild(el);
+            });
+        }
+
         // Concurrency slider display
         const slider = document.getElementById('concurrency');
         if (slider) {
@@ -792,19 +925,31 @@
         }
 
         // ---------------------------------------------------------------
-        // Auto-detect running state on page load
+        // Auto-detect running state on page load, then load dep graph
         // ---------------------------------------------------------------
         fetch('/api/v1/status')
             .then(r => r.json())
             .then(data => {
-                if (data.state === 'running' || data.state === 'paused') {
+                depGraphRunActive = (data.state === 'running' || data.state === 'paused');
+                document.getElementById('dep-show-done').checked = depGraphRunActive;
+                if (depGraphRunActive) {
                     showTab('run');
-                    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
-                    document.querySelectorAll('.tab-bar button')[1].classList.add('active');
                     showActiveRun(data.run_id, []);
                 }
             })
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => {
+                fetch('/api/v1/dependencies')
+                    .then(r => r.json())
+                    .then(data => {
+                        depGraphData = data;
+                        applyDepGraphFilters();
+                    })
+                    .catch(() => {
+                        document.getElementById('dep-graph').innerHTML =
+                            '<p style="color:#888;text-align:center">Could not load dependency graph.</p>';
+                    });
+            });
 
         // ---------------------------------------------------------------
         // Status polling — update nav badge and detect run completion
@@ -828,6 +973,24 @@
                     } else {
                         el.innerHTML = '<small><span class="status-badge status-pending">Idle</span></small>';
                     }
+                    // Update retry panel
+                    updateRetryPanel(data.retries || []);
+
+                    // Update merge queue
+                    updateMergeQueue(data.merge_queue || []);
+
+                    // Update concurrency slider from server state
+                    if (data.rate_limit && data.rate_limit.max_concurrent) {
+                        const sl = document.getElementById('concurrency');
+                        if (sl && !sl.matches(':active')) {
+                            sl.value = data.rate_limit.max_concurrent;
+                            document.getElementById('concurrency-val').textContent = data.rate_limit.max_concurrent;
+                        }
+                    }
+
+                    // Track run state for dep graph filter defaults
+                    const wasActive = depGraphRunActive;
+                    depGraphRunActive = (data.state === 'running' || data.state === 'paused');
                     lastKnownState = data.state;
                 })
                 .catch(() => {
@@ -836,13 +999,129 @@
         }, 5000);
 
         // ---------------------------------------------------------------
-        // Dependency graph — SVG rendering
+        // History loading with failure pattern detection
         // ---------------------------------------------------------------
+        function loadHistory() {
+            fetch('/api/v1/history')
+                .then(r => r.json())
+                .then(data => {
+                    const table = document.getElementById('history-table');
+                    const patternEl = document.getElementById('failure-patterns');
+
+                    // Render failure patterns
+                    const patterns = data.patterns || [];
+                    if (patterns.length > 0 && patternEl) {
+                        patternEl.style.display = 'block';
+                        let html = '<div style="border:1px solid #5a4a2d;border-radius:6px;padding:0.75rem;background:#2a2210">';
+                        html += '<strong style="color:#f0ad4e">Recurring Failures</strong>';
+                        html += '<ul style="margin:0.5rem 0 0;padding-left:1.2rem;font-size:0.9em">';
+                        patterns.forEach(p => {
+                            html += `<li style="color:#d9c9a3;margin:0.2rem 0">${p.message}</li>`;
+                        });
+                        html += '</ul></div>';
+                        patternEl.innerHTML = html;
+                    } else if (patternEl) {
+                        patternEl.style.display = 'none';
+                    }
+
+                    // Render runs table
+                    const runs = data.runs || [];
+                    if (runs.length === 0) {
+                        table.innerHTML = '<p style="color:#888">No runs recorded yet.</p>';
+                        return;
+                    }
+
+                    let html = '<table role="grid"><thead><tr>';
+                    html += '<th>Run ID</th><th>Started</th><th>Duration</th>';
+                    html += '<th>Total</th><th>Done</th><th>Failed</th>';
+                    html += '</tr></thead><tbody>';
+
+                    runs.slice().reverse().forEach(run => {
+                        const dur = run.duration ? `${Math.round(run.duration)}s` : '-';
+                        const failStyle = run.stories_failed > 0 ? 'color:#d9534f;font-weight:600' : '';
+                        html += `<tr>`;
+                        html += `<td style="font-family:monospace;font-size:0.85em">${run.run_id || '-'}</td>`;
+                        html += `<td>${run.started || '-'}</td>`;
+                        html += `<td>${dur}</td>`;
+                        html += `<td>${run.stories_total || 0}</td>`;
+                        html += `<td>${run.stories_completed || 0}</td>`;
+                        html += `<td style="${failStyle}">${run.stories_failed || 0}</td>`;
+                        html += `</tr>`;
+                    });
+
+                    html += '</tbody></table>';
+                    table.innerHTML = html;
+                })
+                .catch(() => {
+                    document.getElementById('history-table').innerHTML =
+                        '<p style="color:#d9534f">Failed to load history.</p>';
+                });
+        }
+
+        // ---------------------------------------------------------------
+        // Dependency graph — filtering & SVG rendering
+        // ---------------------------------------------------------------
+        let depGraphData = null;
+        let depGraphRunActive = false;
+
+        function parseEpicFilter(input) {
+            if (!input.trim()) return null;
+            const nums = new Set();
+            for (const part of input.split(',')) {
+                const range = part.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+                if (range) {
+                    for (let i = parseInt(range[1]); i <= parseInt(range[2]); i++) nums.add(i);
+                } else {
+                    const n = parseInt(part.trim());
+                    if (!isNaN(n)) nums.add(n);
+                }
+            }
+            return nums.size > 0 ? nums : null;
+        }
+
+        function applyDepGraphFilters() {
+            if (!depGraphData) return;
+            const showDone = document.getElementById('dep-show-done').checked;
+            const epicFilter = parseEpicFilter(document.getElementById('dep-epic-filter').value);
+
+            const filteredNodes = depGraphData.nodes.filter(n => {
+                if (!showDone && n.status === 'done') return false;
+                if (epicFilter && !epicFilter.has(n.id)) return false;
+                return true;
+            });
+            const visibleIds = new Set(filteredNodes.map(n => n.id));
+
+            const filteredEdges = (depGraphData.edges || []).filter(e =>
+                visibleIds.has(e.from) && visibleIds.has(e.to));
+            const filteredTiers = (depGraphData.tiers || [])
+                .map(tier => tier.filter(id => visibleIds.has(id)))
+                .filter(tier => tier.length > 0);
+            const filteredChains = (depGraphData.chains || [])
+                .map(chain => chain.filter(id => visibleIds.has(id)))
+                .filter(chain => chain.length > 1);
+            const filteredCritPath = (depGraphData.critical_path || [])
+                .filter(id => visibleIds.has(id));
+
+            renderDepGraph({
+                nodes: filteredNodes,
+                edges: filteredEdges,
+                tiers: filteredTiers,
+                chains: filteredChains,
+                critical_path: filteredCritPath,
+            });
+        }
+
+        function clearDepGraphFilters() {
+            document.getElementById('dep-epic-filter').value = '';
+            document.getElementById('dep-show-done').checked = depGraphRunActive;
+            applyDepGraphFilters();
+        }
+
         const STATUS_COLORS = {
-            done:          { fill: '#2d5a2d', stroke: '#5cb85c', text: '#a3d9a3' },
-            'in-progress': { fill: '#5a4a2d', stroke: '#f0ad4e', text: '#d9c9a3' },
-            pending:       { fill: '#2d3a5a', stroke: '#5bc0de', text: '#a3b9d9' },
-            failed:        { fill: '#5a2d2d', stroke: '#d9534f', text: '#d9a3a3' },
+            done:          { fill: '#1a3a1a', stroke: '#4caf50', text: '#c8e6c9' },
+            'in-progress': { fill: '#3a3018', stroke: '#ff9800', text: '#ffe0b2' },
+            pending:       { fill: '#1a2a3a', stroke: '#64b5f6', text: '#e3f2fd' },
+            failed:        { fill: '#3d1a1a', stroke: '#ef5350', text: '#ffcdd2' },
         };
 
         function renderDepGraph(data) {
@@ -850,11 +1129,7 @@
             const { nodes, edges, tiers, chains, critical_path } = data;
 
             if (!nodes || nodes.length === 0) {
-                container.innerHTML = '<p style="color:#888;text-align:center">No epics found.</p>';
-                return;
-            }
-            if (!edges || edges.length === 0) {
-                container.innerHTML = '<p style="color:#888;text-align:center">No dependencies declared between epics — all can run in parallel.</p>';
+                container.innerHTML = '<p style="color:#888;text-align:center">No epics match the current filter.</p>';
                 return;
             }
 
@@ -953,10 +1228,10 @@
 
             // Legend
             let legend = `<div class="legend">
-                <span><span class="legend-dot" style="background:#5bc0de"></span> Pending</span>
-                <span><span class="legend-dot" style="background:#f0ad4e"></span> In Progress</span>
-                <span><span class="legend-dot" style="background:#5cb85c"></span> Done</span>
-                <span><span class="legend-dot" style="background:#d9534f"></span> Critical Path</span>
+                <span><span class="legend-dot" style="background:#64b5f6"></span> Pending</span>
+                <span><span class="legend-dot" style="background:#ff9800"></span> In Progress</span>
+                <span><span class="legend-dot" style="background:#4caf50"></span> Done</span>
+                <span><span class="legend-dot" style="background:#ef5350"></span> Critical Path</span>
             </div>`;
 
             // Chains summary below the graph
@@ -995,14 +1270,8 @@
             container.innerHTML = svg + legend;
         }
 
-        // Fetch and render on load
-        fetch('/api/v1/dependencies')
-            .then(r => r.json())
-            .then(renderDepGraph)
-            .catch(() => {
-                document.getElementById('dep-graph').innerHTML =
-                    '<p style="color:#888;text-align:center">Could not load dependency graph.</p>';
-            });
+        // Dependency graph is fetched and rendered in the page-load
+        // status handler above (chained after /api/v1/status).
     </script>
 </body>
 </html>

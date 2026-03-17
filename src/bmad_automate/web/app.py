@@ -21,6 +21,7 @@ from bmad_automate.control import RunControl
 from bmad_automate.events import (
     STEP_DONE,
     STEP_FAILED,
+    STEP_RETRYING,
     STEP_SKIPPED,
     STEP_START,
     STORY_DONE,
@@ -68,6 +69,15 @@ def _make_event_to_log_bridge(log_broker: LogBroker):
                 f"Step {step} failed: {error}" if error else f"Step {step} failed",
                 level="error",
             )
+        elif kind == STEP_RETRYING:
+            backoff = event.payload.get("backoff", 0)
+            attempt = event.payload.get("attempt", 0)
+            err = event.payload.get("error", "")
+            _write(
+                f"Step {step} failed ({err}), retrying in {backoff:.0f}s "
+                f"(attempt {attempt})...",
+                level="warning",
+            )
         elif kind == STEP_SKIPPED:
             msg = event.payload.get("message", f"Skipping {step}")
             _write(msg)
@@ -86,6 +96,47 @@ def _make_event_to_log_bridge(log_broker: LogBroker):
             )
 
     return _bridge
+
+
+def _detect_failure_patterns(
+    runs: list[dict], window: int = 5, threshold: int = 2,
+) -> list[dict]:
+    """Detect stories/steps that fail repeatedly across recent runs.
+
+    Scans the last *window* runs (default 5) and reports any story+step
+    combination that failed in at least *threshold* runs (default 2).
+    """
+    recent = runs[-window:] if len(runs) > window else runs
+    if not recent:
+        return []
+
+    # Count failures per (story, step) pair
+    counts: dict[tuple[str, str], int] = {}
+    total_runs = len(recent)
+    for run in recent:
+        failures = run.get("failures", [])
+        for f in failures:
+            key = (f.get("story", ""), f.get("failed_step", ""))
+            counts[key] = counts.get(key, 0) + 1
+
+    patterns = []
+    for (story, step), count in sorted(counts.items(), key=lambda x: -x[1]):
+        if count >= threshold:
+            patterns.append({
+                "story": story,
+                "step": step,
+                "count": count,
+                "window": total_runs,
+                "message": (
+                    f"{story} has failed at {step} in "
+                    f"{count} of the last {total_runs} runs"
+                    if step else
+                    f"{story} has failed in "
+                    f"{count} of the last {total_runs} runs"
+                ),
+            })
+
+    return patterns
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +190,8 @@ class RunManager:
         self._state: str = "idle"  # idle, running, paused, finished
         self._stories_processed: list[str] = []
         self._error: str | None = None
+        self._rate_limiter = None  # set during run for concurrency control
+        self._merge_queue = None   # set during run for merge queue visibility
 
     @property
     def state(self) -> str:
@@ -208,6 +261,9 @@ class RunManager:
                     config=config,
                     ctx=ctx,
                 )
+                # Expose orchestrator internals for web API access
+                self._rate_limiter = orch.rate_limiter
+                self._merge_queue = orch.merge_queue
                 results = orch.run()
                 ctx.results.extend(results)
             except Exception:
@@ -226,6 +282,16 @@ class RunManager:
         if self.ctx is None:
             return
         duration = time.time() - self.ctx.start_time if self.ctx.start_time else 0
+
+        # Per-story failure details for pattern detection
+        failures: list[dict] = []
+        for r in self.ctx.results:
+            if r.status == StoryStatus.FAILED:
+                failures.append({
+                    "story": r.key,
+                    "failed_step": r.failed_step or "",
+                })
+
         entry = {
             "run_id": self.run_id,
             "started": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -239,6 +305,7 @@ class RunManager:
                 1 for r in self.ctx.results
                 if r.status == StoryStatus.FAILED
             ),
+            "failures": failures,
         }
         history_file = config.project_root / "runs.json"
         try:
@@ -302,6 +369,32 @@ def create_app(
             )
         if _run_manager._error:
             result["error"] = _run_manager._error
+
+        # Merge queue state
+        mq = _run_manager._merge_queue
+        if mq is not None:
+            from bmad_automate.merge_queue import MergeStatus
+
+            queue_items = []
+            for req in mq.queue:
+                queue_items.append({
+                    "epic": req.epic_num,
+                    "status": req.status.value,
+                    "error": req.error,
+                })
+            result["merge_queue"] = queue_items
+
+        # Active retries
+        if _run_manager.ctx is not None:
+            result["retries"] = _run_manager.ctx.retry_registry.to_dict()
+
+        # Rate limiter state
+        rl = _run_manager._rate_limiter
+        if rl is not None:
+            result["rate_limit"] = {
+                "max_concurrent": rl.max_concurrent,
+            }
+
         return result
 
     @app.post("/api/v1/run")
@@ -409,7 +502,35 @@ def create_app(
             return ControlResponse(accepted=True)
 
         if action == "set_concurrency" and request.value is not None:
+            # Forward to the orchestrator's rate limiter if available
+            rl = getattr(_run_manager, "_rate_limiter", None)
+            if rl is not None:
+                rl.adjust_concurrency(request.value)
             return ControlResponse(accepted=True)
+
+        if action == "retry" and request.epic is not None and request.story and request.step:
+            if _run_manager.ctx is not None:
+                found = _run_manager.ctx.retry_registry.retry_now(
+                    request.epic, request.story, request.step,
+                )
+                if found:
+                    return ControlResponse(accepted=True)
+                return ControlResponse(
+                    accepted=False, reason="No active retry for that step"
+                )
+            return ControlResponse(accepted=False, reason="No active run")
+
+        if action == "skip_step" and request.epic is not None and request.story and request.step:
+            if _run_manager.ctx is not None:
+                found = _run_manager.ctx.retry_registry.skip(
+                    request.epic, request.story, request.step,
+                )
+                if found:
+                    return ControlResponse(accepted=True)
+                return ControlResponse(
+                    accepted=False, reason="No active retry for that step"
+                )
+            return ControlResponse(accepted=False, reason="No active run")
 
         return ControlResponse(
             accepted=False, reason=f"Unknown or incomplete action: {action}"
@@ -473,17 +594,21 @@ def create_app(
 
     @app.get("/api/v1/history")
     async def get_history() -> dict:
-        """List past runs."""
+        """List past runs with failure pattern detection."""
         runs: list[dict] = []
         if _history_file.exists():
-            for line in _history_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line:
+            for raw_line in _history_file.read_text(encoding="utf-8").splitlines():
+                raw_line = raw_line.strip()
+                if raw_line:
                     try:
-                        runs.append(json.loads(line))
+                        runs.append(json.loads(raw_line))
                     except json.JSONDecodeError:
                         continue
-        return {"runs": runs}
+
+        # Pattern detection: find stories/steps that fail repeatedly
+        patterns = _detect_failure_patterns(runs)
+
+        return {"runs": runs, "patterns": patterns}
 
     @app.get("/api/v1/stories")
     async def get_stories() -> dict:
@@ -574,7 +699,7 @@ def create_app(
                 ctx.start_time = time.time()
                 retro_results: list = []
                 for epic_num in request.after_epic:
-                    if ctrl.should_stop():
+                    if ctrl.should_stop(epic_num):
                         break
                     run_after_epic_pipeline(epic_num, config, ctx, retro_results)
             except Exception:

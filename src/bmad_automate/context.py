@@ -8,6 +8,7 @@ from bmad_automate.control import RunControl
 from bmad_automate.events import EventBus
 from bmad_automate.logging import LogBroker
 from bmad_automate.models import Config, StoryResult
+from bmad_automate.retry import RetryRegistry
 
 
 @dataclass
@@ -24,6 +25,7 @@ class RunContext:
     event_bus: EventBus = field(default_factory=EventBus)
     log_broker: LogBroker | None = None
     run_control: RunControl = field(default_factory=RunControl)
+    retry_registry: RetryRegistry = field(default_factory=RetryRegistry)
 
     @property
     def interrupted(self) -> bool:

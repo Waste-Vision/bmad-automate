@@ -12,9 +12,11 @@ from bmad_automate.events import (
     LOG_MESSAGE,
     STEP_DONE,
     STEP_FAILED,
+    STEP_RETRYING,
     STEP_START,
     PipelineEvent,
 )
+from bmad_automate.retry import RetryController
 from bmad_automate.models import Config, StepResult, StepStatus
 from bmad_automate.stories import invalidate_cache
 from bmad_automate.ui import (
@@ -91,6 +93,9 @@ def run_step(
 
     log_to_file(f"Running {step_name} for {story_key}", config)
     log_to_file(f"Command: {command}", config)
+
+    retry_ctrl: RetryController | None = None
+    registry = ctx.retry_registry
 
     for attempt in range(config.retries + 1):
         if ctx.interrupted:
@@ -172,6 +177,9 @@ def run_step(
                 log_to_file(
                     f"SUCCESS: {step_name} ({format_duration(duration)})", config
                 )
+                # Clean up retry controller on success
+                if retry_ctrl is not None:
+                    registry.unregister(retry_ctrl.key)
                 return StepResult(
                     name=step_name, status=StepStatus.SUCCESS, duration=duration
                 )
@@ -180,9 +188,50 @@ def run_step(
             log_to_file(f"FAILED: {step_name} - {error}", config)
 
             if attempt < config.retries:
-                console.print(f"  [yellow]Retrying {step_name}...[/yellow]")
+                # Create or reuse retry controller for coordinated backoff
+                if retry_ctrl is None:
+                    retry_ctrl = RetryController(
+                        epic=epic_num, story=story_key, step=step_name,
+                        max_retries=config.retries,
+                    )
+                    registry.register(retry_ctrl)
+
+                backoff = retry_ctrl.enter_backoff()
+                bus.emit(PipelineEvent(
+                    epic=epic_num, story=story_key, step=step_name,
+                    kind=STEP_RETRYING,
+                    payload={"attempt": attempt + 1, "backoff": backoff,
+                             "error": error},
+                ))
+                bus.drain()
+
+                if not config.quiet and not bus.has_subscribers():
+                    console.print(
+                        f"  [yellow]Retrying {step_name} "
+                        f"in {backoff:.0f}s...[/yellow]"
+                    )
+
+                action = retry_ctrl.wait_backoff()
+                if action == "skip":
+                    registry.unregister(retry_ctrl.key)
+                    bus.emit(PipelineEvent(
+                        epic=epic_num, story=story_key, step=step_name,
+                        kind=STEP_FAILED,
+                        payload={"error": "Skipped by user",
+                                 "duration": time.time() - start_time},
+                    ))
+                    bus.drain()
+                    return StepResult(
+                        name=step_name, status=StepStatus.FAILED,
+                        error="Skipped by user",
+                        duration=time.time() - start_time,
+                    )
+                # action == "retry" — loop continues
                 continue
 
+            # Exhausted all retries
+            if retry_ctrl is not None:
+                registry.unregister(retry_ctrl.key)
             bus.emit(PipelineEvent(
                 epic=epic_num, story=story_key, step=step_name,
                 kind=STEP_FAILED,
@@ -199,6 +248,8 @@ def run_step(
         except subprocess.TimeoutExpired:
             error = f"Timeout after {config.timeout}s"
             log_to_file(f"TIMEOUT: {step_name} - {error}", config)
+            if retry_ctrl is not None:
+                registry.unregister(retry_ctrl.key)
             bus.emit(PipelineEvent(
                 epic=epic_num, story=story_key, step=step_name,
                 kind=STEP_FAILED,
@@ -215,6 +266,8 @@ def run_step(
         except Exception as e:
             error = str(e)
             log_to_file(f"ERROR: {step_name} - {error}", config)
+            if retry_ctrl is not None:
+                registry.unregister(retry_ctrl.key)
             bus.emit(PipelineEvent(
                 epic=epic_num, story=story_key, step=step_name,
                 kind=STEP_FAILED,

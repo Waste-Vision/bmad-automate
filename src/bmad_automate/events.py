@@ -18,6 +18,7 @@ STORY_DONE = "story_done"
 EPIC_START = "epic_start"
 EPIC_DONE = "epic_done"
 STATUS_CHANGE = "status_change"
+STEP_RETRYING = "step_retrying"
 LOG_LINE = "log_line"
 LOG_MESSAGE = "log_message"
 
