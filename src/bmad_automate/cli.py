@@ -445,6 +445,17 @@ def main(
     if ctx_typer.invoked_subcommand is not None:
         return
 
+    # Typer's invoke_without_command=True with a variadic positional argument
+    # can swallow subcommand names (e.g. "serve") as story keys instead of
+    # routing them.  Detect this and re-invoke the correct subcommand.
+    if stories:
+        click_group = ctx_typer.command
+        if hasattr(click_group, "commands"):
+            for story_arg in stories:
+                if story_arg in click_group.commands:
+                    ctx_typer.invoke(click_group.commands[story_arg])
+                    return
+
     # ---- resolve --only vs --skip-* flags ----
     if only:
         if any([skip_create, skip_dev, skip_review, skip_commit, skip_pull]):
@@ -843,12 +854,17 @@ def serve(
 
     fastapi_app = create_app(project_dir=project_dir.resolve())
 
-    # Open browser after server starts listening
+    # Open browser after server starts listening — use a timer thread so it
+    # fires reliably regardless of FastAPI lifecycle quirks.
+    import threading
     import webbrowser
 
-    @fastapi_app.on_event("startup")
-    async def _open_browser() -> None:
+    def _open_browser() -> None:
         webbrowser.open(f"http://localhost:{port}")
+
+    @fastapi_app.on_event("startup")
+    async def _schedule_browser_open() -> None:
+        threading.Timer(0.5, _open_browser).start()
 
     uvicorn.run(fastapi_app, host="127.0.0.1", port=port, log_level="info")
 
