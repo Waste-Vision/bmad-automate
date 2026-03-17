@@ -86,8 +86,8 @@
                     Notify
                 </label>
             </li>
-            <li><span id="server-status" hx-get="/api/v1/status" hx-trigger="every 5s" hx-swap="innerHTML">
-                <small>Connecting...</small>
+            <li><span id="server-status">
+                <small><span class="status-badge status-pending">Idle</span></small>
             </span></li>
         </ul>
     </nav>
