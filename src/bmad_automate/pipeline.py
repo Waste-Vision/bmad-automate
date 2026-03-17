@@ -7,7 +7,15 @@ import time
 from rich.progress import Progress, TaskID
 
 from bmad_automate.context import RunContext
+from bmad_automate.events import (
+    LOG_MESSAGE,
+    STEP_SKIPPED,
+    STORY_DONE,
+    STORY_START,
+    PipelineEvent,
+)
 from bmad_automate.git import (
+    _extract_epic_num,
     mark_story_done,
     run_after_epic_commit,
     run_git_pull,
@@ -44,7 +52,13 @@ def process_story(
     start_time = time.time()
     story_path = get_story_path(story_key, config)
     steps: list[StepResult] = []
+    epic_num = _extract_epic_num(story_key)
+    bus = ctx.event_bus
 
+    bus.emit(PipelineEvent(
+        epic=epic_num, story=story_key, step=None,
+        kind=STORY_START,
+    ))
     log_to_file(f"=== Starting story: {story_key} ===", config)
 
     ai = config.ai_command
@@ -88,7 +102,13 @@ def process_story(
     skip_dev = config.skip_dev
 
     if story_status == "review":
-        if not config.quiet:
+        bus.emit(PipelineEvent(
+            epic=epic_num, story=story_key, step="create-story",
+            kind=STEP_SKIPPED,
+            payload={"message": "Status is 'review', skipping create-story "
+                     "and dev-story"},
+        ))
+        if not config.quiet and not bus.has_subscribers():
             console.print(
                 "  [dim]Status is 'review', skipping create-story "
                 "and dev-story[/dim]"
@@ -96,7 +116,12 @@ def process_story(
         skip_create = True
         skip_dev = True
     elif not skip_create and story_path.exists():
-        if not config.quiet:
+        bus.emit(PipelineEvent(
+            epic=epic_num, story=story_key, step="create-story",
+            kind=STEP_SKIPPED,
+            payload={"message": "Story file exists, skipping create-story"},
+        ))
+        if not config.quiet and not bus.has_subscribers():
             console.print("  [dim]Story file exists, skipping create-story[/dim]")
         skip_create = True
 
@@ -113,7 +138,12 @@ def process_story(
             break
 
         if skip:
-            if not config.quiet:
+            bus.emit(PipelineEvent(
+                epic=epic_num, story=story_key, step=step_name,
+                kind=STEP_SKIPPED,
+            ))
+            bus.drain()
+            if not config.quiet and not bus.has_subscribers():
                 console.print(
                     f"  [yellow]Skipping[/yellow] [magenta]{step_name}[/magenta]"
                 )
@@ -127,8 +157,9 @@ def process_story(
             failed_step = step_name
             break
 
-    # git-pull: direct subprocess, only invoke AI if merge conflicts arise
-    if not failed_step and not ctx.interrupted:
+    # git-pull: direct subprocess, only invoke AI if merge conflicts arise.
+    # In worktree mode the merge queue handles syncing, so skip pull/push.
+    if not failed_step and not ctx.interrupted and not config.in_worktree:
         pull_result = run_git_pull(
             story_key, config, merge_conflict_prompt, ctx
         )
@@ -151,6 +182,13 @@ def process_story(
         f"({format_duration(duration)}) ===",
         config,
     )
+
+    bus.emit(PipelineEvent(
+        epic=epic_num, story=story_key, step=None,
+        kind=STORY_DONE,
+        payload={"status": status.value, "duration": duration},
+    ))
+    bus.drain()
 
     return StoryResult(
         key=story_key,

@@ -7,6 +7,14 @@ import subprocess
 import time
 
 from bmad_automate.context import RunContext
+from bmad_automate.events import (
+    LOG_LINE,
+    LOG_MESSAGE,
+    STEP_DONE,
+    STEP_FAILED,
+    STEP_START,
+    PipelineEvent,
+)
 from bmad_automate.models import Config, StepResult, StepStatus
 from bmad_automate.stories import invalidate_cache
 from bmad_automate.ui import (
@@ -25,6 +33,7 @@ def run_git_command(
     config: Config,
     label: str,
     timeout: int = 120,
+    cwd: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a git command, log its output, and return the CompletedProcess.
 
@@ -39,6 +48,7 @@ def run_git_command(
         timeout=timeout,
         encoding="utf-8",
         errors="replace",
+        cwd=cwd,
     )
     if result.stdout:
         log_to_file(f"{label} STDOUT:\n{result.stdout}", config)
@@ -51,6 +61,14 @@ def run_git_command(
 # run_step — execute a single AI-driven step
 # ---------------------------------------------------------------------------
 
+def _extract_epic_num(story_key: str) -> int:
+    """Extract epic number from a story key like '3-1-feature'."""
+    try:
+        return int(story_key.split("-")[0])
+    except (ValueError, IndexError):
+        return 0
+
+
 def run_step(
     step_name: str,
     command: str,
@@ -60,9 +78,10 @@ def run_step(
 ) -> StepResult:
     """Execute a single workflow step with retry and timeout handling."""
     start_time = time.time()
+    bus = ctx.event_bus
+    epic_num = _extract_epic_num(story_key)
 
     if config.dry_run:
-        epic_num = story_key.split("-")[0] if story_key else ""
         context = f" (Epic {epic_num}, Story {story_key})" if epic_num else ""
         console.print(
             f"  [dim][DRY-RUN][/dim] Would run: "
@@ -83,7 +102,14 @@ def run_step(
             )
 
         try:
-            if not config.quiet:
+            bus.emit(PipelineEvent(
+                epic=epic_num, story=story_key, step=step_name,
+                kind=STEP_START,
+                payload={"attempt": attempt, "retries": config.retries},
+            ))
+            bus.drain()
+
+            if not config.quiet and not bus.has_subscribers():
                 attempt_str = (
                     f" (attempt {attempt + 1}/{config.retries + 1})"
                     if attempt > 0
@@ -119,12 +145,30 @@ def run_step(
                 stderr = stderr.strip()
 
             if result.stdout:
+                bus.emit(PipelineEvent(
+                    epic=epic_num, story=story_key, step=step_name,
+                    kind=LOG_LINE,
+                    payload={"label": "", "stream": "STDOUT",
+                             "content": result.stdout},
+                ))
                 log_to_file(f"STDOUT:\n{result.stdout}", config)
             if stderr:
+                bus.emit(PipelineEvent(
+                    epic=epic_num, story=story_key, step=step_name,
+                    kind=LOG_LINE,
+                    payload={"label": "", "stream": "STDERR",
+                             "content": stderr},
+                ))
                 log_to_file(f"STDERR:\n{stderr}", config)
 
             if result.returncode == 0:
                 duration = time.time() - start_time
+                bus.emit(PipelineEvent(
+                    epic=epic_num, story=story_key, step=step_name,
+                    kind=STEP_DONE,
+                    payload={"duration": duration},
+                ))
+                bus.drain()
                 log_to_file(
                     f"SUCCESS: {step_name} ({format_duration(duration)})", config
                 )
@@ -139,6 +183,12 @@ def run_step(
                 console.print(f"  [yellow]Retrying {step_name}...[/yellow]")
                 continue
 
+            bus.emit(PipelineEvent(
+                epic=epic_num, story=story_key, step=step_name,
+                kind=STEP_FAILED,
+                payload={"error": error, "duration": time.time() - start_time},
+            ))
+            bus.drain()
             return StepResult(
                 name=step_name,
                 status=StepStatus.FAILED,
@@ -149,6 +199,12 @@ def run_step(
         except subprocess.TimeoutExpired:
             error = f"Timeout after {config.timeout}s"
             log_to_file(f"TIMEOUT: {step_name} - {error}", config)
+            bus.emit(PipelineEvent(
+                epic=epic_num, story=story_key, step=step_name,
+                kind=STEP_FAILED,
+                payload={"error": error, "duration": time.time() - start_time},
+            ))
+            bus.drain()
             return StepResult(
                 name=step_name,
                 status=StepStatus.FAILED,
@@ -159,6 +215,12 @@ def run_step(
         except Exception as e:
             error = str(e)
             log_to_file(f"ERROR: {step_name} - {error}", config)
+            bus.emit(PipelineEvent(
+                epic=epic_num, story=story_key, step=step_name,
+                kind=STEP_FAILED,
+                payload={"error": error, "duration": time.time() - start_time},
+            ))
+            bus.drain()
             return StepResult(
                 name=step_name,
                 status=StepStatus.FAILED,
@@ -322,7 +384,11 @@ def run_git_pull(
 # ---------------------------------------------------------------------------
 
 def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
-    """Commit, pull, and push any changes produced by the after-epic pipeline."""
+    """Commit any changes produced by the after-epic pipeline.
+
+    In worktree mode only commits (the merge queue handles syncing).
+    In sequential mode also pulls and pushes to the remote.
+    """
     step_name = f"after-epic-commit-{epic_num}"
     start_time = time.time()
 
@@ -355,6 +421,16 @@ def run_after_epic_commit(epic_num: int, config: Config) -> StepResult:
             return StepResult(
                 name=step_name, status=StepStatus.FAILED,
                 error=error, duration=time.time() - start_time,
+            )
+
+        # In worktree mode the merge queue handles syncing — skip pull/push.
+        if config.in_worktree:
+            duration = time.time() - start_time
+            log_to_file(
+                f"SUCCESS: {step_name} ({format_duration(duration)})", config
+            )
+            return StepResult(
+                name=step_name, status=StepStatus.SUCCESS, duration=duration
             )
 
         pull = run_git_command("git pull", config, "pull")

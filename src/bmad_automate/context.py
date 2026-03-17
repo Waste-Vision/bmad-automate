@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from bmad_automate.control import RunControl
+from bmad_automate.events import EventBus
+from bmad_automate.logging import LogBroker
 from bmad_automate.models import Config, StoryResult
 
 
@@ -16,9 +19,24 @@ class RunContext:
     """
 
     config: Config
-    interrupted: bool = False
     results: list[StoryResult] = field(default_factory=list)
     start_time: float = 0.0
+    event_bus: EventBus = field(default_factory=EventBus)
+    log_broker: LogBroker | None = None
+    run_control: RunControl = field(default_factory=RunControl)
+
+    @property
+    def interrupted(self) -> bool:
+        """Backward-compatible property — checks run_control.global_abort."""
+        return self.run_control.global_abort
+
+    @interrupted.setter
+    def interrupted(self, value: bool) -> None:
+        """Backward-compatible setter — sets global_abort on run_control."""
+        if value:
+            self.run_control.abort()
+        else:
+            self.run_control.global_abort = False
 
 
 # Singleton used by the signal handler (which cannot receive extra args).

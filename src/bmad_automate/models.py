@@ -118,6 +118,15 @@ class Config:
     # AI provider
     ai_provider: str = DEFAULT_AI_PROVIDER
 
+    # Project root (resolved at startup)
+    project_root: Path = field(default_factory=Path.cwd)
+
+    # Parallelisation
+    parallel_epics: int = 1  # 1 = sequential (default)
+
+    # Worktree mode (set automatically when running inside a worktree)
+    in_worktree: bool = False
+
     @property
     def ai_command(self) -> str:
         """Return the AI CLI command for the configured provider."""

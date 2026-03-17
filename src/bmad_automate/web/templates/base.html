@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMAD Automate Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+    <style>
+        :root { --pico-font-size: 14px; }
+        nav { margin-bottom: 0; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--pico-muted-border-color); }
+        .tab-bar button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 0.5rem 1rem; cursor: pointer; margin-bottom: -2px; }
+        .tab-bar button.active { border-bottom-color: var(--pico-primary); color: var(--pico-primary); }
+        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+        .status-done { background: #2d5a2d; color: #a3d9a3; }
+        .status-in-progress { background: #5a4a2d; color: #d9c9a3; }
+        .status-ready-for-dev { background: #2d3a5a; color: #a3b9d9; }
+        .status-backlog { background: #3a3a3a; color: #b0b0b0; }
+        .status-failed { background: #5a2d2d; color: #d9a3a3; }
+        .status-pending { background: #3a3a3a; color: #b0b0b0; }
+        .story-card { border: 1px solid var(--pico-muted-border-color); padding: 0.5rem; margin: 0.25rem 0; border-radius: 4px; }
+        .board { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
+        .board-column h4 { text-align: center; padding: 0.5rem; background: var(--pico-card-background-color); border-radius: 4px; }
+        .log-panel { background: #1a1a1a; color: #e0e0e0; padding: 1rem; font-family: monospace; font-size: 0.85em; max-height: 500px; overflow-y: auto; border-radius: 4px; }
+        .log-line { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+        .controls button { padding: 0.4rem 0.8rem; font-size: 0.85em; }
+        .merge-queue { margin: 1rem 0; }
+        .merge-item { padding: 0.3rem 0.5rem; border-left: 3px solid var(--pico-primary); margin: 0.25rem 0; }
+        /* Dependency graph */
+        .dep-graph { background: #1a1a2e; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; }
+        .dep-graph svg { display: block; margin: 0 auto; }
+        .dep-graph .legend { display: flex; gap: 1.5rem; justify-content: center; margin-top: 0.75rem; font-size: 0.8em; color: #b0b0b0; }
+        .dep-graph .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+        /* Run config form */
+        .form-section { border: 1px solid var(--pico-muted-border-color); border-radius: 6px; padding: 1rem; margin: 0.75rem 0; }
+        .form-section summary { cursor: pointer; font-weight: 600; margin-bottom: 0.5rem; }
+        .form-row { display: flex; gap: 1rem; flex-wrap: wrap; align-items: end; }
+        .form-row > * { flex: 1; min-width: 150px; }
+        .form-row label { margin-bottom: 0; }
+        .checkbox-grid { display: flex; gap: 1rem; flex-wrap: wrap; }
+        .checkbox-grid label { display: flex; align-items: center; gap: 0.3rem; font-size: 0.9em; cursor: pointer; margin-bottom: 0; }
+        .checkbox-grid input[type="checkbox"] { margin: 0; }
+        .run-actions { display: flex; gap: 0.5rem; margin: 1rem 0; }
+        .run-actions button { padding: 0.5rem 1.2rem; }
+        .tag-input { display: flex; flex-wrap: wrap; gap: 0.3rem; padding: 0.3rem; border: 1px solid var(--pico-muted-border-color); border-radius: 4px; min-height: 36px; align-items: center; }
+        .tag { display: inline-flex; align-items: center; gap: 0.2rem; background: var(--pico-primary-background); padding: 2px 8px; border-radius: 3px; font-size: 0.85em; }
+        .tag .remove { cursor: pointer; font-weight: bold; opacity: 0.7; }
+        .tag .remove:hover { opacity: 1; }
+        .tag-input input { border: none; outline: none; background: none; flex: 1; min-width: 100px; font-size: 0.9em; color: var(--pico-color); padding: 2px; }
+        /* Story progress tracker */
+        .story-progress { margin: 1rem 0; }
+        .story-progress-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--pico-muted-border-color); font-size: 0.9em; }
+        .story-progress-item:last-child { border-bottom: none; }
+        .step-indicators { display: flex; gap: 0.25rem; }
+        .step-dot { width: 18px; height: 18px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 0.7em; font-weight: bold; }
+        .step-dot.pending { background: #3a3a3a; color: #888; }
+        .step-dot.running { background: #5a4a2d; color: #f0ad4e; animation: pulse 1.5s infinite; }
+        .step-dot.done { background: #2d5a2d; color: #5cb85c; }
+        .step-dot.failed { background: #5a2d2d; color: #d9534f; }
+        .step-dot.skipped { background: #2a2a2a; color: #666; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .story-key { font-family: monospace; min-width: 200px; }
+        .story-status-label { font-size: 0.8em; min-width: 80px; text-align: right; }
+    </style>
+</head>
+<body>
+    <nav class="container-fluid">
+        <ul><li><strong>BMAD Automate</strong></li></ul>
+        <ul>
+            <li>
+                <label style="display:flex;align-items:center;gap:0.3rem;margin:0;font-size:0.85em;cursor:pointer">
+                    <input type="checkbox" id="notify-toggle" style="margin:0" checked>
+                    Notify
+                </label>
+            </li>
+            <li><span id="server-status" hx-get="/api/v1/status" hx-trigger="every 5s" hx-swap="innerHTML">
+                <small>Connecting...</small>
+            </span></li>
+        </ul>
+    </nav>
+
+    <main class="container">
+        <div class="tab-bar" role="tablist">
+            <button class="active" onclick="showTab('dashboard')" role="tab">Dashboard</button>
+            <button onclick="showTab('run')" role="tab">Run</button>
+            <button onclick="showTab('after-epic')" role="tab">After-Epic</button>
+            <button onclick="showTab('history')" role="tab">History</button>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- DASHBOARD TAB -->
+        <!-- ============================================================ -->
+        <div id="tab-dashboard" class="tab-content active">
+            <h3>Epic Dependencies</h3>
+            <div class="dep-graph" id="dep-graph">
+                <p style="color:#888;text-align:center">Loading dependency graph...</p>
+            </div>
+
+            <h3>Sprint Board</h3>
+            <div class="board" hx-get="/api/v1/status" hx-trigger="load" hx-swap="none">
+                <div class="board-column">
+                    <h4>Backlog</h4>
+                    <div id="col-backlog"></div>
+                </div>
+                <div class="board-column">
+                    <h4>Ready for Dev</h4>
+                    <div id="col-ready"></div>
+                </div>
+                <div class="board-column">
+                    <h4>In Progress</h4>
+                    <div id="col-progress"></div>
+                </div>
+                <div class="board-column">
+                    <h4>Review</h4>
+                    <div id="col-review"></div>
+                </div>
+                <div class="board-column">
+                    <h4>Done</h4>
+                    <div id="col-done"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- RUN TAB -->
+        <!-- ============================================================ -->
+        <div id="tab-run" class="tab-content">
+            <!-- Run Configuration Form (shown when idle) -->
+            <div id="run-config">
+                <h3>Start Run</h3>
+
+                <!-- Story Selection -->
+                <div class="form-section">
+                    <strong>Story Selection</strong>
+                    <div class="form-row" style="margin-top:0.5rem">
+                        <label>
+                            Epic(s)
+                            <select id="cfg-epic" multiple size="3" style="font-size:0.9em">
+                                <!-- populated dynamically -->
+                            </select>
+                            <small>Hold Ctrl to select multiple. Leave empty for all.</small>
+                        </label>
+                        <label>
+                            Limit
+                            <input type="number" id="cfg-limit" min="0" value="0" placeholder="0 = unlimited">
+                            <small>Max stories to process (0 = unlimited)</small>
+                        </label>
+                    </div>
+                    <div class="form-row" style="margin-top:0.5rem">
+                        <label>
+                            Specific Stories
+                            <div class="tag-input" id="story-tags">
+                                <input type="text" id="story-tag-input" placeholder="Type story key and press Enter" list="story-datalist">
+                                <datalist id="story-datalist"></datalist>
+                            </div>
+                            <small>Leave empty to use epic/status-based selection</small>
+                        </label>
+                    </div>
+                    <div class="form-row" style="margin-top:0.5rem">
+                        <label>
+                            Start From
+                            <select id="cfg-start-from" style="font-size:0.9em">
+                                <option value="">-- from beginning --</option>
+                                <!-- populated dynamically -->
+                            </select>
+                            <small>Resume from a specific story (skips earlier ones)</small>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Pipeline Steps -->
+                <div class="form-section">
+                    <strong>Pipeline Steps</strong>
+                    <p style="margin:0.3rem 0;font-size:0.85em;color:#999">Select which steps to run. Uncheck to skip.</p>
+                    <div class="checkbox-grid" style="margin-top:0.3rem">
+                        <label><input type="checkbox" id="step-create" checked> create-story</label>
+                        <label><input type="checkbox" id="step-dev" checked> dev-story</label>
+                        <label><input type="checkbox" id="step-review" checked> code-review</label>
+                        <label><input type="checkbox" id="step-commit" checked> git-commit</label>
+                        <label><input type="checkbox" id="step-pull" checked> git-pull</label>
+                    </div>
+                </div>
+
+                <!-- Execution Settings -->
+                <details class="form-section">
+                    <summary>Advanced Settings</summary>
+                    <div class="form-row" style="margin-top:0.5rem">
+                        <label>
+                            AI Provider
+                            <select id="cfg-ai-provider">
+                                <option value="claude" selected>Claude</option>
+                                <option value="github">GitHub Copilot</option>
+                            </select>
+                        </label>
+                        <label>
+                            Parallel Epics
+                            <input type="number" id="cfg-parallel" min="1" max="10" value="1">
+                            <small>1 = sequential, >1 = worktrees</small>
+                        </label>
+                    </div>
+                    <div class="form-row" style="margin-top:0.5rem">
+                        <label>
+                            Retries per step
+                            <input type="number" id="cfg-retries" min="1" max="10" value="1">
+                        </label>
+                        <label>
+                            Timeout per step (seconds)
+                            <input type="number" id="cfg-timeout" min="60" max="7200" value="3600" step="60">
+                        </label>
+                    </div>
+                </details>
+
+                <!-- Actions -->
+                <div class="run-actions">
+                    <button id="btn-start-run" onclick="startRun(false)">Start Run</button>
+                    <button id="btn-dry-run" class="secondary" onclick="startRun(true)">Dry Run (Preview)</button>
+                </div>
+                <div id="run-start-error" style="color:#d9534f;font-size:0.9em;display:none"></div>
+            </div>
+
+            <!-- Active Run View (shown when running/finished) -->
+            <div id="run-active" style="display:none">
+                <h3>Active Run: <span id="active-run-id"></span></h3>
+                <div class="controls">
+                    <button onclick="sendControl('pause_all')" class="secondary">Pause All</button>
+                    <button onclick="sendControl('abort')" class="contrast">Abort</button>
+                    <label style="display:flex;align-items:center;gap:0.5rem">
+                        Concurrency:
+                        <input type="range" id="concurrency" min="1" max="5" value="2"
+                               onchange="sendControl('set_concurrency', {value: parseInt(this.value)})">
+                        <span id="concurrency-val">2</span>
+                    </label>
+                    <button onclick="showRunConfig()" class="outline">New Run</button>
+                </div>
+
+                <!-- Per-Story Progress -->
+                <h4>Story Progress</h4>
+                <div class="story-progress" id="story-progress">
+                    <p style="color:#888;font-size:0.9em">Waiting for stories to start...</p>
+                </div>
+
+                <div class="merge-queue" id="merge-queue"></div>
+
+                <h4>Logs</h4>
+                <div class="log-panel" id="log-output">
+                    <p class="log-line" style="color:#888">Waiting for run to start...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- AFTER-EPIC TAB -->
+        <!-- ============================================================ -->
+        <div id="tab-after-epic" class="tab-content">
+            <h3>After-Epic Pipeline</h3>
+            <p style="font-size:0.9em;color:#999">Run retrospective, course correction, retro implementation, and next-epic prep for completed epics.</p>
+
+            <div class="form-section">
+                <strong>Epic Selection</strong>
+                <div class="form-row" style="margin-top:0.5rem">
+                    <label>
+                        Epic(s) to process
+                        <select id="ae-epic" multiple size="4" style="font-size:0.9em">
+                            <!-- populated dynamically -->
+                        </select>
+                        <small>Select one or more completed epics</small>
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <strong>After-Epic Steps</strong>
+                <p style="margin:0.3rem 0;font-size:0.85em;color:#999">Uncheck steps to skip them.</p>
+                <div class="checkbox-grid" style="margin-top:0.3rem">
+                    <label><input type="checkbox" id="ae-retro" checked> Retrospective</label>
+                    <label><input type="checkbox" id="ae-course-correct" checked> Course Correction</label>
+                    <label><input type="checkbox" id="ae-retro-impl" checked> Retro Implementation</label>
+                    <label><input type="checkbox" id="ae-next-epic-prep" checked> Next Epic Prep</label>
+                </div>
+            </div>
+
+            <details class="form-section">
+                <summary>Advanced Settings</summary>
+                <div class="form-row" style="margin-top:0.5rem">
+                    <label>
+                        AI Provider
+                        <select id="ae-ai-provider">
+                            <option value="claude" selected>Claude</option>
+                            <option value="github">GitHub Copilot</option>
+                        </select>
+                    </label>
+                    <label>
+                        Retries
+                        <input type="number" id="ae-retries" min="1" max="10" value="1">
+                    </label>
+                    <label>
+                        Timeout (seconds)
+                        <input type="number" id="ae-timeout" min="60" max="7200" value="3600" step="60">
+                    </label>
+                </div>
+            </details>
+
+            <div class="run-actions">
+                <button id="btn-start-after-epic" onclick="startAfterEpic(false)">Run After-Epic</button>
+                <button class="secondary" onclick="startAfterEpic(true)">Dry Run (Preview)</button>
+            </div>
+            <div id="ae-error" style="color:#d9534f;font-size:0.9em;display:none"></div>
+            <div id="ae-result" style="display:none;margin-top:1rem"></div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- HISTORY TAB -->
+        <!-- ============================================================ -->
+        <div id="tab-history" class="tab-content">
+            <h3>Run History</h3>
+            <div hx-get="/api/v1/history" hx-trigger="revealed" hx-swap="innerHTML"
+                 id="history-table">
+                <p>Loading...</p>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // ---------------------------------------------------------------
+        // Tab navigation
+        // ---------------------------------------------------------------
+        function showTab(name) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-bar button').forEach(el => el.classList.remove('active'));
+            document.getElementById('tab-' + name).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        // ---------------------------------------------------------------
+        // Browser notifications
+        // ---------------------------------------------------------------
+        let notificationsEnabled = true;
+        const notifyToggle = document.getElementById('notify-toggle');
+        if (notifyToggle) {
+            notifyToggle.addEventListener('change', function() {
+                notificationsEnabled = this.checked;
+                if (this.checked && Notification.permission === 'default') {
+                    Notification.requestPermission();
+                }
+            });
+        }
+
+        function sendBrowserNotification(title, body) {
+            if (!notificationsEnabled) return;
+            if (Notification.permission === 'granted') {
+                new Notification(title, { body, icon: null });
+            } else if (Notification.permission === 'default') {
+                Notification.requestPermission().then(perm => {
+                    if (perm === 'granted') {
+                        new Notification(title, { body, icon: null });
+                    }
+                });
+            }
+        }
+
+        // Request permission on load if toggle is checked
+        if (notificationsEnabled && 'Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+        }
+
+        // ---------------------------------------------------------------
+        // Story tag input
+        // ---------------------------------------------------------------
+        const storyTags = [];
+        const tagContainer = document.getElementById('story-tags');
+        const tagInput = document.getElementById('story-tag-input');
+
+        if (tagInput) {
+            tagInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && this.value.trim()) {
+                    e.preventDefault();
+                    const val = this.value.trim();
+                    if (!storyTags.includes(val)) {
+                        storyTags.push(val);
+                        renderTags();
+                    }
+                    this.value = '';
+                }
+            });
+        }
+
+        function removeTag(idx) {
+            storyTags.splice(idx, 1);
+            renderTags();
+        }
+
+        function renderTags() {
+            const tags = tagContainer.querySelectorAll('.tag');
+            tags.forEach(t => t.remove());
+            storyTags.forEach((tag, i) => {
+                const el = document.createElement('span');
+                el.className = 'tag';
+                el.innerHTML = `${tag} <span class="remove" onclick="removeTag(${i})">&times;</span>`;
+                tagContainer.insertBefore(el, tagInput);
+            });
+        }
+
+        // ---------------------------------------------------------------
+        // Populate dropdowns from /api/v1/stories
+        // ---------------------------------------------------------------
+        let allStories = {};
+        let allEpics = [];
+
+        function populateDropdowns() {
+            fetch('/api/v1/stories')
+                .then(r => r.json())
+                .then(data => {
+                    allStories = data.stories || {};
+                    allEpics = data.epics || [];
+
+                    // Epic selectors
+                    ['cfg-epic', 'ae-epic'].forEach(id => {
+                        const sel = document.getElementById(id);
+                        if (!sel) return;
+                        sel.innerHTML = '';
+                        allEpics.forEach(e => {
+                            const opt = document.createElement('option');
+                            opt.value = e;
+                            opt.textContent = `Epic ${e}`;
+                            sel.appendChild(opt);
+                        });
+                    });
+
+                    // Start-from dropdown
+                    const startFrom = document.getElementById('cfg-start-from');
+                    if (startFrom) {
+                        startFrom.innerHTML = '<option value="">-- from beginning --</option>';
+                        const actionable = ['review', 'in-progress', 'ready-for-dev', 'backlog'];
+                        const storyList = [];
+                        actionable.forEach(status => {
+                            (allStories[status] || []).forEach(key => storyList.push(key));
+                        });
+                        storyList.forEach(key => {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            opt.textContent = key;
+                            startFrom.appendChild(opt);
+                        });
+                    }
+
+                    // Story datalist for tag input
+                    const datalist = document.getElementById('story-datalist');
+                    if (datalist) {
+                        datalist.innerHTML = '';
+                        Object.values(allStories).flat().forEach(key => {
+                            const opt = document.createElement('option');
+                            opt.value = key;
+                            datalist.appendChild(opt);
+                        });
+                    }
+
+                    // Populate sprint board
+                    populateBoard(data);
+                })
+                .catch(() => {});
+        }
+
+        function populateBoard(data) {
+            const statusToCol = {
+                'backlog': 'col-backlog',
+                'ready-for-dev': 'col-ready',
+                'in-progress': 'col-progress',
+                'review': 'col-review',
+                'done': 'col-done',
+            };
+            Object.entries(statusToCol).forEach(([status, colId]) => {
+                const col = document.getElementById(colId);
+                if (!col) return;
+                col.innerHTML = '';
+                const stories = (data.stories || {})[status] || [];
+                stories.forEach(key => {
+                    const card = document.createElement('div');
+                    card.className = 'story-card';
+                    card.textContent = key;
+                    col.appendChild(card);
+                });
+                if (stories.length === 0) {
+                    col.innerHTML = '<p style="color:#666;font-size:0.85em;text-align:center">none</p>';
+                }
+            });
+        }
+
+        populateDropdowns();
+
+        // ---------------------------------------------------------------
+        // Start a run
+        // ---------------------------------------------------------------
+        function getRunConfig(dryRun) {
+            const epicSel = document.getElementById('cfg-epic');
+            const selectedEpics = Array.from(epicSel.selectedOptions).map(o => parseInt(o.value));
+
+            // Build skip_steps from unchecked checkboxes
+            const skipSteps = [];
+            if (!document.getElementById('step-create').checked) skipSteps.push('create');
+            if (!document.getElementById('step-dev').checked) skipSteps.push('dev');
+            if (!document.getElementById('step-review').checked) skipSteps.push('review');
+            if (!document.getElementById('step-commit').checked) skipSteps.push('commit');
+            if (!document.getElementById('step-pull').checked) skipSteps.push('pull');
+
+            return {
+                epic: selectedEpics,
+                limit: parseInt(document.getElementById('cfg-limit').value) || 0,
+                specific_stories: storyTags.length > 0 ? storyTags : [],
+                start_from: document.getElementById('cfg-start-from').value || '',
+                skip_steps: skipSteps,
+                ai_provider: document.getElementById('cfg-ai-provider').value,
+                parallel_epics: parseInt(document.getElementById('cfg-parallel').value) || 1,
+                retries: parseInt(document.getElementById('cfg-retries').value) || 1,
+                timeout: parseInt(document.getElementById('cfg-timeout').value) || 3600,
+                dry_run: dryRun,
+            };
+        }
+
+        function startRun(dryRun) {
+            const errEl = document.getElementById('run-start-error');
+            errEl.style.display = 'none';
+
+            const config = getRunConfig(dryRun);
+
+            fetch('/api/v1/run', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(r => {
+                if (!r.ok) return r.json().then(d => { throw new Error(d.detail || 'Failed to start run'); });
+                return r.json();
+            })
+            .then(data => {
+                if (dryRun) {
+                    // For dry run, show the result inline and switch to active view to see logs
+                    showActiveRun(data.run_id, data.stories || []);
+                } else {
+                    showActiveRun(data.run_id, data.stories || []);
+                }
+            })
+            .catch(err => {
+                errEl.textContent = err.message;
+                errEl.style.display = 'block';
+            });
+        }
+
+        function showActiveRun(runId, stories) {
+            document.getElementById('run-config').style.display = 'none';
+            document.getElementById('run-active').style.display = 'block';
+            document.getElementById('active-run-id').textContent = runId;
+
+            // Initialize story progress tracker
+            initStoryProgress(stories);
+
+            // Start log streaming
+            startLogStream(runId);
+        }
+
+        function showRunConfig() {
+            document.getElementById('run-config').style.display = 'block';
+            document.getElementById('run-active').style.display = 'none';
+            if (eventSource) { eventSource.close(); eventSource = null; }
+            populateDropdowns();
+        }
+
+        // ---------------------------------------------------------------
+        // After-Epic pipeline
+        // ---------------------------------------------------------------
+        function startAfterEpic(dryRun) {
+            const errEl = document.getElementById('ae-error');
+            const resultEl = document.getElementById('ae-result');
+            errEl.style.display = 'none';
+            resultEl.style.display = 'none';
+
+            const epicSel = document.getElementById('ae-epic');
+            const selectedEpics = Array.from(epicSel.selectedOptions).map(o => parseInt(o.value));
+
+            if (selectedEpics.length === 0) {
+                errEl.textContent = 'Please select at least one epic.';
+                errEl.style.display = 'block';
+                return;
+            }
+
+            const body = {
+                after_epic: selectedEpics,
+                ai_provider: document.getElementById('ae-ai-provider').value,
+                retries: parseInt(document.getElementById('ae-retries').value) || 1,
+                timeout: parseInt(document.getElementById('ae-timeout').value) || 3600,
+                dry_run: dryRun,
+                skip_retro: !document.getElementById('ae-retro').checked,
+                skip_course_correct: !document.getElementById('ae-course-correct').checked,
+                skip_retro_impl: !document.getElementById('ae-retro-impl').checked,
+                skip_next_epic_prep: !document.getElementById('ae-next-epic-prep').checked,
+            };
+
+            fetch('/api/v1/after-epic', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            })
+            .then(r => {
+                if (!r.ok) return r.json().then(d => { throw new Error(d.detail || 'Failed to start after-epic'); });
+                return r.json();
+            })
+            .then(data => {
+                // Switch to run tab to show logs
+                showTab('run');
+                document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+                document.querySelectorAll('.tab-bar button')[1].classList.add('active');
+                showActiveRun(data.run_id, data.epics ? data.epics.map(e => `after-epic-${e}`) : []);
+            })
+            .catch(err => {
+                errEl.textContent = err.message;
+                errEl.style.display = 'block';
+            });
+        }
+
+        // ---------------------------------------------------------------
+        // Run controls
+        // ---------------------------------------------------------------
+        function sendControl(action, extra) {
+            const body = {action, ...(extra || {})};
+            fetch('/api/v1/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+        }
+
+        // ---------------------------------------------------------------
+        // Per-story step progress tracker
+        // ---------------------------------------------------------------
+        const STEP_NAMES = ['create', 'dev', 'review', 'commit', 'pull'];
+        const STEP_ABBR = { create: 'C', dev: 'D', review: 'R', commit: 'G', pull: 'P' };
+        let storyProgressMap = {};  // story_key -> { steps: {step_name: status}, overall: status }
+
+        function initStoryProgress(stories) {
+            const container = document.getElementById('story-progress');
+            container.innerHTML = '';
+            storyProgressMap = {};
+
+            if (stories.length === 0) {
+                container.innerHTML = '<p style="color:#888;font-size:0.9em">No stories in this run.</p>';
+                return;
+            }
+
+            // Header row
+            const header = document.createElement('div');
+            header.className = 'story-progress-item';
+            header.style.fontWeight = '600';
+            header.style.fontSize = '0.8em';
+            header.style.color = '#999';
+            header.innerHTML = `<span class="story-key">Story</span>
+                <span class="step-indicators">${STEP_NAMES.map(s => `<span class="step-dot pending" title="${s}">${STEP_ABBR[s]}</span>`).join('')}</span>
+                <span class="story-status-label">Status</span>`;
+            container.appendChild(header);
+
+            stories.forEach(key => {
+                storyProgressMap[key] = {
+                    steps: {},
+                    overall: 'pending'
+                };
+                STEP_NAMES.forEach(s => { storyProgressMap[key].steps[s] = 'pending'; });
+
+                const row = document.createElement('div');
+                row.className = 'story-progress-item';
+                row.id = `sp-${key}`;
+                row.innerHTML = `<span class="story-key">${key}</span>
+                    <span class="step-indicators">${STEP_NAMES.map(s =>
+                        `<span class="step-dot pending" id="sd-${key}-${s}" title="${s}">${STEP_ABBR[s]}</span>`
+                    ).join('')}</span>
+                    <span class="story-status-label" id="ss-${key}">pending</span>`;
+                container.appendChild(row);
+            });
+        }
+
+        function updateStoryStep(story, step, status) {
+            // Map step names like "create-story" to short names like "create"
+            const stepMap = {
+                'create-story': 'create', 'dev-story': 'dev',
+                'code-review': 'review', 'git-commit': 'commit', 'git-pull': 'pull'
+            };
+            const shortStep = stepMap[step] || step;
+
+            if (!storyProgressMap[story]) return;
+            storyProgressMap[story].steps[shortStep] = status;
+
+            const dot = document.getElementById(`sd-${story}-${shortStep}`);
+            if (dot) {
+                dot.className = `step-dot ${status}`;
+            }
+        }
+
+        function updateStoryOverall(story, status) {
+            if (!storyProgressMap[story]) return;
+            storyProgressMap[story].overall = status;
+
+            const label = document.getElementById(`ss-${story}`);
+            if (label) {
+                label.textContent = status;
+                const colorMap = { completed: '#5cb85c', failed: '#d9534f', skipped: '#888', running: '#f0ad4e' };
+                label.style.color = colorMap[status] || '#999';
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // SSE log streaming
+        // ---------------------------------------------------------------
+        let eventSource = null;
+        function startLogStream(runId) {
+            if (eventSource) eventSource.close();
+            const logPanel = document.getElementById('log-output');
+            logPanel.innerHTML = '';
+            eventSource = new EventSource('/api/v1/logs/' + runId);
+
+            eventSource.addEventListener('log', function(e) {
+                const data = JSON.parse(e.data);
+                const line = document.createElement('p');
+                line.className = 'log-line';
+
+                // Color-code by level
+                if (data.level === 'error') line.style.color = '#d9534f';
+                else if (data.level === 'warning') line.style.color = '#f0ad4e';
+                else if (data.level === 'success') line.style.color = '#5cb85c';
+
+                // Prefix with epic/story context if available
+                let prefix = '';
+                if (data.epic) prefix += `[E${data.epic}]`;
+                if (data.story) prefix += `[${data.story}]`;
+                if (data.step) prefix += `[${data.step}]`;
+                if (prefix) prefix += ' ';
+
+                line.textContent = prefix + data.line;
+                logPanel.appendChild(line);
+                logPanel.scrollTop = logPanel.scrollHeight;
+
+                // Update step progress from structured event_kind
+                const ek = data.event_kind;
+                if (ek && data.story) {
+                    if (ek === 'step_start' && data.step) {
+                        updateStoryStep(data.story, data.step, 'running');
+                        updateStoryOverall(data.story, 'running');
+                    } else if (ek === 'step_done' && data.step) {
+                        updateStoryStep(data.story, data.step, 'done');
+                    } else if (ek === 'step_failed' && data.step) {
+                        updateStoryStep(data.story, data.step, 'failed');
+                        updateStoryOverall(data.story, 'failed');
+                    } else if (ek === 'step_skipped' && data.step) {
+                        updateStoryStep(data.story, data.step, 'skipped');
+                    } else if (ek === 'story_start') {
+                        updateStoryOverall(data.story, 'running');
+                    } else if (ek === 'story_done') {
+                        const status = data.line.includes('completed') ? 'completed' :
+                                       data.line.includes('failed') ? 'failed' : 'completed';
+                        updateStoryOverall(data.story, status);
+                    }
+                }
+            });
+
+            eventSource.addEventListener('gap', function(e) {
+                const data = JSON.parse(e.data);
+                const line = document.createElement('p');
+                line.className = 'log-line';
+                line.style.color = '#f0ad4e';
+                line.textContent = '... ' + data.missed + ' log lines were skipped ...';
+                logPanel.appendChild(line);
+            });
+
+            eventSource.addEventListener('done', function(e) {
+                const line = document.createElement('p');
+                line.className = 'log-line';
+                line.style.color = '#5cb85c';
+                line.textContent = '--- Run finished ---';
+                logPanel.appendChild(line);
+
+                // Send browser notification
+                sendBrowserNotification('BMAD Automate', 'Run finished');
+            });
+        }
+
+        // Concurrency slider display
+        const slider = document.getElementById('concurrency');
+        if (slider) {
+            slider.addEventListener('input', function() {
+                document.getElementById('concurrency-val').textContent = this.value;
+            });
+        }
+
+        // ---------------------------------------------------------------
+        // Auto-detect running state on page load
+        // ---------------------------------------------------------------
+        fetch('/api/v1/status')
+            .then(r => r.json())
+            .then(data => {
+                if (data.state === 'running' || data.state === 'paused') {
+                    showTab('run');
+                    document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.tab-bar button')[1].classList.add('active');
+                    showActiveRun(data.run_id, []);
+                }
+            })
+            .catch(() => {});
+
+        // ---------------------------------------------------------------
+        // Status polling — update nav badge and detect run completion
+        // ---------------------------------------------------------------
+        let lastKnownState = 'idle';
+        setInterval(() => {
+            fetch('/api/v1/status')
+                .then(r => r.json())
+                .then(data => {
+                    const el = document.getElementById('server-status');
+                    if (data.state === 'running') {
+                        const total = data.stories_total || 0;
+                        const done = data.stories_completed || 0;
+                        const failed = data.stories_failed || 0;
+                        el.innerHTML = `<small><span class="status-badge status-in-progress">Running</span> ${done}/${total} done${failed ? `, ${failed} failed` : ''}</small>`;
+                    } else if (data.state === 'finished') {
+                        el.innerHTML = '<small><span class="status-badge status-done">Idle</span></small>';
+                        if (lastKnownState === 'running') {
+                            sendBrowserNotification('BMAD Automate', 'Run completed');
+                        }
+                    } else {
+                        el.innerHTML = '<small><span class="status-badge status-pending">Idle</span></small>';
+                    }
+                    lastKnownState = data.state;
+                })
+                .catch(() => {
+                    document.getElementById('server-status').innerHTML = '<small style="color:#d9534f">Disconnected</small>';
+                });
+        }, 5000);
+
+        // ---------------------------------------------------------------
+        // Dependency graph — SVG rendering
+        // ---------------------------------------------------------------
+        const STATUS_COLORS = {
+            done:          { fill: '#2d5a2d', stroke: '#5cb85c', text: '#a3d9a3' },
+            'in-progress': { fill: '#5a4a2d', stroke: '#f0ad4e', text: '#d9c9a3' },
+            pending:       { fill: '#2d3a5a', stroke: '#5bc0de', text: '#a3b9d9' },
+            failed:        { fill: '#5a2d2d', stroke: '#d9534f', text: '#d9a3a3' },
+        };
+
+        function renderDepGraph(data) {
+            const container = document.getElementById('dep-graph');
+            const { nodes, edges, tiers, chains, critical_path } = data;
+
+            if (!nodes || nodes.length === 0) {
+                container.innerHTML = '<p style="color:#888;text-align:center">No epics found.</p>';
+                return;
+            }
+            if (!edges || edges.length === 0) {
+                container.innerHTML = '<p style="color:#888;text-align:center">No dependencies declared between epics — all can run in parallel.</p>';
+                return;
+            }
+
+            // Build set of critical-path edges for highlighting
+            const critSet = new Set();
+            if (critical_path && critical_path.length > 1) {
+                for (let i = 0; i < critical_path.length - 1; i++) {
+                    critSet.add(critical_path[i] + '->' + critical_path[i+1]);
+                }
+            }
+            const critNodes = new Set(critical_path || []);
+
+            // Layout constants
+            const nodeW = 140, nodeH = 56, padX = 60, padY = 70, topPad = 30;
+
+            // Compute positions: x by position within tier, y by tier depth
+            const maxTierSize = Math.max(...tiers.map(t => t.length));
+            const svgW = Math.max(maxTierSize * (nodeW + padX) + padX, 400);
+            const svgH = tiers.length * (nodeH + padY) + topPad + 40;
+
+            const pos = {};  // epicId -> {x, y}
+            tiers.forEach((tier, depth) => {
+                const tierW = tier.length * (nodeW + padX) - padX;
+                const startX = (svgW - tierW) / 2;
+                tier.forEach((epicId, i) => {
+                    pos[epicId] = {
+                        x: startX + i * (nodeW + padX),
+                        y: topPad + depth * (nodeH + padY),
+                    };
+                });
+            });
+
+            // Build SVG
+            let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">`;
+
+            // Arrowhead markers (normal and critical)
+            svg += `<defs>
+                     <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5"
+                      markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+                     </marker>
+                     <marker id="arrow-crit" viewBox="0 0 10 10" refX="10" refY="5"
+                      markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" fill="#d9534f"/>
+                     </marker>
+                     </defs>`;
+
+            // Draw edges (arrows from dependency to dependent)
+            edges.forEach(edge => {
+                const from = pos[edge.from], to = pos[edge.to];
+                if (!from || !to) return;
+                const x1 = from.x + nodeW / 2, y1 = from.y + nodeH;
+                const x2 = to.x + nodeW / 2, y2 = to.y;
+                const midY = (y1 + y2) / 2;
+                const isCrit = critSet.has(edge.from + '->' + edge.to);
+                const color = isCrit ? '#d9534f' : '#888';
+                const width = isCrit ? 3 : 2;
+                const marker = isCrit ? 'url(#arrow-crit)' : 'url(#arrow)';
+                svg += `<path d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}"
+                         fill="none" stroke="${color}" stroke-width="${width}"
+                         marker-end="${marker}"/>`;
+            });
+
+            // Draw nodes
+            nodes.forEach(node => {
+                const p = pos[node.id];
+                if (!p) return;
+                const colors = STATUS_COLORS[node.status] || STATUS_COLORS.pending;
+                const isCrit = critNodes.has(node.id);
+                const strokeW = isCrit ? 3 : 2;
+                const stroke = isCrit ? '#d9534f' : colors.stroke;
+                const progress = node.stories_total > 0
+                    ? `${node.stories_done}/${node.stories_total} stories`
+                    : '';
+
+                svg += `<rect x="${p.x}" y="${p.y}" width="${nodeW}" height="${nodeH}"
+                         rx="6" ry="6" fill="${colors.fill}" stroke="${stroke}"
+                         stroke-width="${strokeW}"/>`;
+                svg += `<text x="${p.x + nodeW/2}" y="${p.y + 22}"
+                         text-anchor="middle" fill="${colors.text}"
+                         font-size="13" font-weight="600">${node.label}</text>`;
+                if (progress) {
+                    svg += `<text x="${p.x + nodeW/2}" y="${p.y + 40}"
+                             text-anchor="middle" fill="${colors.text}"
+                             font-size="11" opacity="0.8">${progress}</text>`;
+                }
+            });
+
+            // Tier labels on the left
+            tiers.forEach((tier, depth) => {
+                const y = topPad + depth * (nodeH + padY) + nodeH / 2 + 4;
+                svg += `<text x="4" y="${y}" fill="#666" font-size="10">Tier ${depth}</text>`;
+            });
+
+            svg += '</svg>';
+
+            // Legend
+            let legend = `<div class="legend">
+                <span><span class="legend-dot" style="background:#5bc0de"></span> Pending</span>
+                <span><span class="legend-dot" style="background:#f0ad4e"></span> In Progress</span>
+                <span><span class="legend-dot" style="background:#5cb85c"></span> Done</span>
+                <span><span class="legend-dot" style="background:#d9534f"></span> Critical Path</span>
+            </div>`;
+
+            // Chains summary below the graph
+            const nodeMap = {};
+            nodes.forEach(n => { nodeMap[n.id] = n; });
+
+            if (chains && chains.length > 0) {
+                let chainsHtml = '<div style="margin-top:1rem;font-size:0.85em;color:#b0b0b0">';
+                chainsHtml += '<strong style="color:#e0e0e0">Dependency Chains:</strong><br>';
+                chains.forEach((chain, i) => {
+                    const isCritical = critical_path && JSON.stringify(chain) === JSON.stringify(critical_path);
+                    const parts = chain.map(id => {
+                        const n = nodeMap[id];
+                        const stories = n ? `(${n.stories_total})` : '';
+                        return `Epic ${id} ${stories}`;
+                    });
+                    const style = isCritical ? 'color:#d9534f;font-weight:600' : '';
+                    const marker = isCritical ? ' &larr; critical path (most stories)' : '';
+                    chainsHtml += `<span style="${style}">  Chain ${i+1}: ${parts.join(' &rarr; ')}${marker}</span><br>`;
+                });
+
+                // Convergence points
+                const convergence = nodes.filter(n => n.dependencies && n.dependencies.length > 1);
+                if (convergence.length > 0) {
+                    chainsHtml += '<br>';
+                    convergence.forEach(n => {
+                        const deps = n.dependencies.map(d => `Epic ${d}`).join(' and ');
+                        chainsHtml += `<span style="color:#f0ad4e">  Epic ${n.id} waits for ${deps} &mdash; gated on the slowest chain</span><br>`;
+                    });
+                }
+
+                chainsHtml += '</div>';
+                legend += chainsHtml;
+            }
+
+            container.innerHTML = svg + legend;
+        }
+
+        // Fetch and render on load
+        fetch('/api/v1/dependencies')
+            .then(r => r.json())
+            .then(renderDepGraph)
+            .catch(() => {
+                document.getElementById('dep-graph').innerHTML =
+                    '<p style="color:#888;text-align:center">Could not load dependency graph.</p>';
+            });
+    </script>
+</body>
+</html>

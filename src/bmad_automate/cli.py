@@ -46,6 +46,7 @@ from rich.progress import (
 )
 
 from bmad_automate.context import RunContext, set_active_context
+from bmad_automate.control import get_active_control, set_active_control
 from bmad_automate.models import (
     AI_PROVIDERS,
     ALL_STEPS,
@@ -60,6 +61,7 @@ from bmad_automate.models import (
     StepResult,
     StoryStatus,
 )
+from bmad_automate.orchestrator import Orchestrator
 from bmad_automate.pipeline import process_story, run_after_epic_pipeline
 from bmad_automate.stories import (
     filter_stories,
@@ -73,6 +75,7 @@ from bmad_automate.ui import (
     console,
     format_duration,
     log_to_file,
+    print_dependency_graph,
     print_dry_run_preview,
     print_final_summary,
     print_story_summary,
@@ -96,11 +99,16 @@ app = typer.Typer(
 
 def signal_handler(signum: int, frame: object) -> None:  # noqa: ARG001
     """Handle interrupt signals (Ctrl+C, SIGTERM) gracefully."""
-    from bmad_automate.context import get_active_context
+    ctrl = get_active_control()
+    if ctrl is not None:
+        ctrl.abort()
+    else:
+        # Fallback for legacy code paths
+        from bmad_automate.context import get_active_context
 
-    ctx = get_active_context()
-    if ctx is not None:
-        ctx.interrupted = True
+        ctx = get_active_context()
+        if ctx is not None:
+            ctx.interrupted = True
     console.print(
         "\n[yellow]Interrupt received. Finishing current operation...[/yellow]"
     )
@@ -142,11 +150,55 @@ def _parse_only(value: str) -> dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Dependency graph helper
+# ---------------------------------------------------------------------------
+
+def _show_dependency_graph(
+    stories: list[str], config: Config,
+) -> None:
+    """Build and display the dependency graph for the epics in *stories*."""
+    import re
+
+    import yaml
+
+    from bmad_automate.dependencies import build_dag
+
+    # Extract unique epic numbers from stories
+    epic_nums = sorted({
+        int(m.group(1))
+        for s in stories
+        if (m := re.match(r"^(\d+)-", s))
+    })
+    if len(epic_nums) < 2:
+        return  # no point showing a graph for a single epic
+
+    # Count stories per epic
+    story_counts: dict[int, int] = {}
+    for s in stories:
+        m = re.match(r"^(\d+)-", s)
+        if m:
+            epic = int(m.group(1))
+            story_counts[epic] = story_counts.get(epic, 0) + 1
+
+    # Load YAML for dependency parsing
+    yaml_text = ""
+    yaml_data: dict = {}
+    if config.sprint_status.exists():
+        with open(config.sprint_status, encoding="utf-8") as f:
+            yaml_text = f.read()
+        yaml_data = yaml.safe_load(yaml_text) or {}
+
+    dag = build_dag(yaml_data, yaml_text, epic_nums)
+    print_dependency_graph(dag, story_counts=story_counts)
+
+
+# ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
+    ctx_typer: typer.Context,
     # Positional arguments
     stories: Annotated[
         Optional[list[str]],
@@ -332,6 +384,17 @@ def main(
             ),
         ),
     ] = DEFAULT_AI_PROVIDER,
+    # Parallelisation
+    parallel_epics: Annotated[
+        int,
+        typer.Option(
+            "--parallel-epics",
+            help=(
+                "Process up to N epics concurrently in separate git "
+                "worktrees (default: 1 = sequential)"
+            ),
+        ),
+    ] = 1,
 ) -> None:
     """
     Automated BMAD Workflow Orchestrator.
@@ -378,6 +441,10 @@ def main(
         # Use GitHub Copilot instead of Claude
         bmad-automate --ai-provider github
     """
+    # If a subcommand (e.g. serve) was invoked, skip the default handler.
+    if ctx_typer.invoked_subcommand is not None:
+        return
+
     # ---- resolve --only vs --skip-* flags ----
     if only:
         if any([skip_create, skip_dev, skip_review, skip_commit, skip_pull]):
@@ -423,6 +490,7 @@ def main(
         timeout=timeout,
         bmad_dir=bmad_dir,
         ai_provider=ai_provider,
+        parallel_epics=parallel_epics,
     )
 
     # ---- validate ----
@@ -444,6 +512,7 @@ def main(
     # ---- run context & signal handlers ----
     ctx = RunContext(config=config)
     set_active_context(ctx)
+    set_active_control(ctx.run_control)
     setup_signal_handlers()
 
     # ---- get and filter stories ----
@@ -525,6 +594,9 @@ def main(
                 console.print()
 
         if filtered_stories:
+            # Show dependency graph if multiple epics
+            _show_dependency_graph(filtered_stories, config)
+
             print_dry_run_preview(filtered_stories, config)
             console.print("[bold]Story steps that would run:[/bold]")
             for story in filtered_stories:
@@ -595,79 +667,95 @@ def main(
 
     # ---- process stories ----
     if filtered_stories:
-        console.print()
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            console=console,
-            transient=False,
-        ) as progress:
-            task = progress.add_task(
-                "[cyan]Processing stories...", total=len(filtered_stories)
+        if config.parallel_epics > 1:
+            # Parallel mode — delegate to Orchestrator
+            orch = Orchestrator(
+                stories=filtered_stories,
+                story_status_map=story_status_map,
+                config=config,
+                ctx=ctx,
             )
-
-            for i, story in enumerate(filtered_stories):
-                if ctx.interrupted:
-                    console.print("\n[yellow]Interrupted by user[/yellow]")
-                    break
-
-                progress.update(
-                    task,
-                    description=(
-                        f"[cyan]Story {i + 1}/{len(filtered_stories)}: {story}"
-                    ),
-                )
-
-                result = process_story(
-                    story, config, ctx, story_status_map.get(story, "")
-                )
-                ctx.results.append(result)
-
+            orch_results = orch.run()
+            ctx.results.extend(orch_results)
+            for result in orch_results:
                 print_story_summary(result, config)
-                progress.advance(task)
+        else:
+            # Sequential mode — original behavior
+            console.print()
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                task = progress.add_task(
+                    "[cyan]Processing stories...", total=len(filtered_stories)
+                )
 
-                if result.status == StoryStatus.FAILED:
-                    console.print(
-                        f"\n[red]Story {story} failed, stopping automation[/red]"
+                for i, story in enumerate(filtered_stories):
+                    if ctx.interrupted:
+                        console.print("\n[yellow]Interrupted by user[/yellow]")
+                        break
+
+                    progress.update(
+                        task,
+                        description=(
+                            f"[cyan]Story {i + 1}/{len(filtered_stories)}: "
+                            f"{story}"
+                        ),
                     )
-                    break
 
-                # Check if this story's epic now needs a retro
-                if (
-                    not config.skip_retro
-                    and not ctx.interrupted
-                    and result.status == StoryStatus.COMPLETED
-                ):
-                    story_epic = int(story.split("-")[0])
-                    epics = [
-                        e
-                        for e in get_epics_needing_retro(config)
-                        if e == story_epic
-                    ]
-                    for epic_num in epics:
-                        if epic_num not in retro_done_epics:
-                            retro_done_epics.add(epic_num)
-                            console.print(
-                                f"\n  [cyan]Epic {epic_num} complete — "
-                                f"running after-epic pipeline...[/cyan]"
-                            )
-                            log_to_file(
-                                f"Running after-epic pipeline for "
-                                f"epic {epic_num}",
-                                config,
-                            )
-                            run_after_epic_pipeline(
-                                epic_num,
-                                config,
-                                ctx,
-                                retro_results,
-                                require_retro_success=True,
-                                progress=progress,
-                                progress_task=task,
-                            )
+                    result = process_story(
+                        story, config, ctx, story_status_map.get(story, "")
+                    )
+                    ctx.results.append(result)
+
+                    print_story_summary(result, config)
+                    progress.advance(task)
+
+                    if result.status == StoryStatus.FAILED:
+                        console.print(
+                            f"\n[red]Story {story} failed, stopping "
+                            f"automation[/red]"
+                        )
+                        break
+
+                    # Check if this story's epic now needs a retro
+                    if (
+                        not config.skip_retro
+                        and not ctx.interrupted
+                        and result.status == StoryStatus.COMPLETED
+                    ):
+                        story_epic = int(story.split("-")[0])
+                        epics = [
+                            e
+                            for e in get_epics_needing_retro(config)
+                            if e == story_epic
+                        ]
+                        for epic_num in epics:
+                            if epic_num not in retro_done_epics:
+                                retro_done_epics.add(epic_num)
+                                console.print(
+                                    f"\n  [cyan]Epic {epic_num} complete — "
+                                    f"running after-epic pipeline...[/cyan]"
+                                )
+                                log_to_file(
+                                    f"Running after-epic pipeline for "
+                                    f"epic {epic_num}",
+                                    config,
+                                )
+                                run_after_epic_pipeline(
+                                    epic_num,
+                                    config,
+                                    ctx,
+                                    retro_results,
+                                    require_retro_success=True,
+                                    progress=progress,
+                                    progress_task=task,
+                                )
 
     # ---- final summary ----
     total_duration = time.time() - ctx.start_time
@@ -714,6 +802,55 @@ def main(
         raise typer.Exit(1)
     elif ctx.interrupted:
         raise typer.Exit(130)
+
+
+@app.command("serve")
+def serve(
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="Port to listen on"),
+    ] = 8080,
+    project_dir: Annotated[
+        Path,
+        typer.Option(
+            "--project-dir",
+            help="Project directory (default: current directory)",
+        ),
+    ] = Path("."),
+) -> None:
+    """Launch the web dashboard server."""
+    import uvicorn
+
+    from bmad_automate.web.app import create_app
+    from bmad_automate.web.lock import ServerLock
+
+    lock = ServerLock(project_dir)
+    existing = lock.is_server_running()
+    if existing:
+        console.print(
+            f"[yellow]Server already running on port {existing.port} "
+            f"(PID {existing.pid})[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    if not lock.acquire(port):
+        console.print("[red]Error: Could not acquire server lock[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        f"[green]Starting BMAD Dashboard on http://localhost:{port}[/green]"
+    )
+
+    fastapi_app = create_app(project_dir=project_dir.resolve())
+
+    # Open browser after server starts listening
+    import webbrowser
+
+    @fastapi_app.on_event("startup")
+    async def _open_browser() -> None:
+        webbrowser.open(f"http://localhost:{port}")
+
+    uvicorn.run(fastapi_app, host="127.0.0.1", port=port, log_level="info")
 
 
 if __name__ == "__main__":

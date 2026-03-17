@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import subprocess
 import sys
+import threading
 from datetime import datetime
 
 from rich.console import Console
@@ -21,8 +22,31 @@ from bmad_automate.models import (
     StoryStatus,
 )
 
-# Shared Rich console instance.
-console = Console()
+# Thread-safe Rich console wrapper.
+_console = Console()
+_console_lock = threading.Lock()
+
+
+class _ThreadSafeConsole:
+    """Wraps Rich Console with a lock so prints from worker threads
+    don't interleave at the character level."""
+
+    def __getattr__(self, name: str):
+        attr = getattr(_console, name)
+        if not callable(attr):
+            return attr
+
+        def _locked(*args, **kwargs):
+            with _console_lock:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
+console = _ThreadSafeConsole()  # type: ignore[assignment]
+
+# Lock for file logging.
+_log_file_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +97,72 @@ def format_duration(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 def log_to_file(message: str, config: Config) -> None:
-    """Append a timestamped message to the log file."""
+    """Append a timestamped message to the log file.  Thread-safe."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(config.log_file, "a", encoding="utf-8") as f:
-        f.write(f"[{timestamp}] {message}\n")
+    with _log_file_lock:
+        with open(config.log_file, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {message}\n")
+
+
+# ---------------------------------------------------------------------------
+# Dependency graph visualisation (CLI)
+# ---------------------------------------------------------------------------
+
+def print_dependency_graph(
+    dag: object,
+    story_counts: dict[int, int] | None = None,
+) -> None:
+    """Print a visual dependency graph to the terminal.
+
+    Shows dependency chains so users can identify the critical path
+    and see which epics gate which.  Story counts (if provided)
+    highlight where bottlenecks are.
+    """
+    from bmad_automate.dependencies import DAG
+
+    if not isinstance(dag, DAG) or not dag.has_dependencies():
+        return
+
+    chains = dag.get_chains()
+    counts = story_counts or {}
+
+    console.print()
+    console.print(Panel("[bold]Epic Dependency Chains[/bold]", style="blue"))
+    console.print()
+
+    # Find the critical path
+    critical = dag.get_critical_path(counts) if counts else None
+
+    for i, chain in enumerate(chains):
+        parts: list[str] = []
+        total_stories = 0
+        for epic in chain:
+            n = counts.get(epic, 0)
+            total_stories += n
+            label = f"Epic {epic}"
+            if n > 0:
+                label += f" ({n})"
+            parts.append(f"[cyan]{label}[/cyan]")
+
+        chain_str = " -> ".join(parts)
+        is_critical = critical is not None and chain == critical
+        marker = " [red bold]<< critical path[/red bold]" if is_critical else ""
+        stories_note = f"  [dim]({total_stories} stories total)[/dim]" if total_stories else ""
+
+        console.print(f"  Chain {i + 1}: {chain_str}{stories_note}{marker}")
+
+    # Show convergence points (epics with multiple dependencies)
+    console.print()
+    for epic in sorted(dag._epics):
+        deps = dag.get_dependencies(epic)
+        if len(deps) > 1:
+            dep_str = " and ".join(f"[cyan]Epic {d}[/cyan]" for d in deps)
+            console.print(
+                f"  [yellow]Epic {epic}[/yellow] waits for "
+                f"{dep_str} — gated on the slowest chain"
+            )
+
+    console.print()
 
 
 # ---------------------------------------------------------------------------
