@@ -31,6 +31,7 @@ from bmad_automate.events import (
 )
 from bmad_automate.logging import LogBroker
 from bmad_automate.models import AI_PROVIDERS, Config, StoryStatus
+from bmad_automate.worktree import WorktreeManager
 
 WEB_DIR = Path(__file__).parent
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -341,6 +342,7 @@ def create_app(
     _run_control = run_control or RunControl()
     _event_bus = event_bus or EventBus()
     _run_manager = RunManager()
+    _worktree_mgr = WorktreeManager(project_root=_project_dir)
 
     # Run history file
     _history_file = _project_dir / "runs.json"
@@ -760,6 +762,43 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # ------------------------------------------------------------------
+    # Worktree routes
+    # ------------------------------------------------------------------
+
+    @app.get("/api/v1/worktrees")
+    async def list_worktrees() -> dict:
+        """List existing git worktrees."""
+        items = _worktree_mgr.list_existing()
+        return {
+            "worktrees": [
+                {"epic": epic_num, "path": str(path)}
+                for epic_num, path in items
+            ]
+        }
+
+    @app.delete("/api/v1/worktrees/{epic_num}")
+    async def remove_worktree(epic_num: int) -> dict:
+        """Remove a single worktree."""
+        if _run_manager.is_running:
+            raise HTTPException(409, "Cannot remove worktrees while a run is active")
+        try:
+            _worktree_mgr.remove(epic_num)
+            return {"status": "removed", "epic": epic_num}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to remove worktree: {e}")
+
+    @app.delete("/api/v1/worktrees")
+    async def cleanup_worktrees() -> dict:
+        """Remove all worktrees."""
+        if _run_manager.is_running:
+            raise HTTPException(409, "Cannot remove worktrees while a run is active")
+        try:
+            _worktree_mgr.cleanup_all()
+            return {"status": "cleaned"}
+        except Exception as e:
+            raise HTTPException(500, f"Failed to cleanup worktrees: {e}")
 
     # ------------------------------------------------------------------
     # HTML routes

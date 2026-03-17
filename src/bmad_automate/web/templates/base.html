@@ -97,6 +97,7 @@
             <button class="active" onclick="showTab('dashboard')" role="tab">Dashboard</button>
             <button onclick="showTab('run')" role="tab">Run</button>
             <button onclick="showTab('after-epic')" role="tab">After-Epic</button>
+            <button onclick="showTab('worktrees')" role="tab">Worktrees</button>
             <button onclick="showTab('history')" role="tab">History</button>
         </div>
 
@@ -104,19 +105,19 @@
         <!-- DASHBOARD TAB -->
         <!-- ============================================================ -->
         <div id="tab-dashboard" class="tab-content active">
-            <h3>Epic Dependencies</h3>
             <div id="dep-graph-controls" class="dep-graph-controls">
                 <label style="display:flex;align-items:center;gap:0.3rem;cursor:pointer">
-                    <input type="checkbox" id="dep-show-done" onchange="applyDepGraphFilters()"> Show completed
+                    <input type="checkbox" id="dep-show-done" onchange="applyDashboardFilters()"> Show completed
                 </label>
                 <label style="display:flex;align-items:center;gap:0.3rem">
-                    Filter:
+                    Filter epics:
                     <input type="text" id="dep-epic-filter" placeholder="e.g. 1,5,10-15"
                            style="width:160px;padding:0.2rem 0.5rem;font-size:0.9em;">
                 </label>
-                <button onclick="applyDepGraphFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Apply</button>
-                <button class="secondary" onclick="clearDepGraphFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Reset</button>
+                <button onclick="applyDashboardFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Apply</button>
+                <button class="secondary" onclick="clearDashboardFilters()" style="padding:0.2rem 0.8rem;font-size:0.9em;">Reset</button>
             </div>
+            <h3>Epic Dependencies</h3>
             <div class="dep-graph" id="dep-graph">
                 <p style="color:#888;text-align:center">Loading dependency graph...</p>
             </div>
@@ -153,6 +154,11 @@
             <!-- Run Configuration Form (shown when idle) -->
             <div id="run-config">
                 <h3>Start Run</h3>
+
+                <div style="margin-bottom:1rem;padding:0.8rem;border:1px solid var(--pico-muted-border-color);border-radius:8px;display:flex;align-items:center;gap:1rem">
+                    <button id="btn-quick-go" onclick="quickGo()">Quick Go</button>
+                    <span style="font-size:0.9em;color:#999">Start all uncompleted epics with default settings</span>
+                </div>
 
                 <!-- Story Selection -->
                 <div class="form-section">
@@ -344,6 +350,21 @@
         </div>
 
         <!-- ============================================================ -->
+        <!-- WORKTREES TAB -->
+        <!-- ============================================================ -->
+        <div id="tab-worktrees" class="tab-content">
+            <h3>Worktrees</h3>
+            <p style="font-size:0.9em;color:#999">Git worktrees for parallel epic processing. Each epic gets an isolated worktree at <code>.bmad-worktrees/epic-N</code>.</p>
+            <div class="run-actions" style="margin-bottom:1rem">
+                <button class="secondary" onclick="loadWorktrees()">Refresh</button>
+                <button class="contrast" onclick="cleanupAllWorktrees()">Remove All</button>
+            </div>
+            <div id="worktree-list">
+                <p>Loading...</p>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
         <!-- HISTORY TAB -->
         <!-- ============================================================ -->
         <div id="tab-history" class="tab-content">
@@ -365,12 +386,13 @@
             buttons.forEach(el => el.classList.remove('active'));
             document.getElementById('tab-' + name).classList.add('active');
             // Activate the matching tab button — find by onclick or data attr
-            const tabMap = ['dashboard', 'run', 'after-epic', 'history'];
+            const tabMap = ['dashboard', 'run', 'after-epic', 'worktrees', 'history'];
             const idx = tabMap.indexOf(name);
             if (idx >= 0 && buttons[idx]) buttons[idx].classList.add('active');
 
-            // Lazy-load history when tab is shown
+            // Lazy-load tab data when shown
             if (name === 'history') loadHistory();
+            if (name === 'worktrees') loadWorktrees();
         }
 
         // ---------------------------------------------------------------
@@ -496,13 +518,18 @@
                         });
                     }
 
-                    // Populate sprint board
-                    populateBoard(data);
+                    // Populate sprint board (respecting current filters)
+                    boardData = data;
+                    preselectUncompletedEpics();
+                    applyDashboardFilters();
                 })
                 .catch(() => {});
         }
 
-        function populateBoard(data) {
+        let boardData = null;
+
+        function populateBoard(data, epicFilter, doneEpics) {
+            boardData = data;
             const statusToCol = {
                 'backlog': 'col-backlog',
                 'ready-for-dev': 'col-ready',
@@ -514,7 +541,14 @@
                 const col = document.getElementById(colId);
                 if (!col) return;
                 col.innerHTML = '';
-                const stories = (data.stories || {})[status] || [];
+                let stories = (data.stories || {})[status] || [];
+                stories = stories.filter(key => {
+                    const epicNum = parseInt(key.split('-')[0]);
+                    if (isNaN(epicNum)) return true;
+                    if (epicFilter && !epicFilter.has(epicNum)) return false;
+                    if (doneEpics && doneEpics.has(epicNum)) return false;
+                    return true;
+                });
                 // Update count badge in column header
                 const header = col.parentElement.querySelector('h4');
                 if (header) {
@@ -567,6 +601,51 @@
                 timeout: parseInt(document.getElementById('cfg-timeout').value) || 3600,
                 dry_run: dryRun,
             };
+        }
+
+        function quickGo() {
+            const errEl = document.getElementById('run-start-error');
+            errEl.style.display = 'none';
+
+            let epicList = [];
+            if (depGraphData) {
+                epicList = depGraphData.nodes
+                    .filter(n => n.status !== 'done')
+                    .map(n => n.id);
+            }
+            if (depGraphData && epicList.length === 0) {
+                errEl.textContent = 'All epics are completed — nothing to run.';
+                errEl.style.display = 'block';
+                return;
+            }
+
+            const config = {
+                epic: epicList,
+                limit: 0,
+                specific_stories: [],
+                start_from: '',
+                skip_steps: [],
+                ai_provider: 'claude',
+                parallel_epics: 1,
+                retries: 1,
+                timeout: 3600,
+                dry_run: false,
+            };
+
+            fetch('/api/v1/run', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(r => {
+                if (!r.ok) return r.json().then(d => { throw new Error(d.detail || 'Failed to start run'); });
+                return r.json();
+            })
+            .then(data => showActiveRun(data.run_id, data.stories || []))
+            .catch(err => {
+                errEl.textContent = err.message;
+                errEl.style.display = 'block';
+            });
         }
 
         function startRun(dryRun) {
@@ -943,7 +1022,8 @@
                     .then(r => r.json())
                     .then(data => {
                         depGraphData = data;
-                        applyDepGraphFilters();
+                        preselectUncompletedEpics();
+                        applyDashboardFilters();
                     })
                     .catch(() => {
                         document.getElementById('dep-graph').innerHTML =
@@ -997,6 +1077,58 @@
                     document.getElementById('server-status').innerHTML = '<small style="color:#d9534f">Disconnected</small>';
                 });
         }, 5000);
+
+        // ---------------------------------------------------------------
+        // Worktree management
+        // ---------------------------------------------------------------
+        function loadWorktrees() {
+            fetch('/api/v1/worktrees')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('worktree-list');
+                    const wts = data.worktrees || [];
+                    if (wts.length === 0) {
+                        container.innerHTML = '<p style="color:#888">No worktrees found.</p>';
+                        return;
+                    }
+                    let html = '<table role="grid"><thead><tr><th>Epic</th><th>Path</th><th></th></tr></thead><tbody>';
+                    wts.forEach(wt => {
+                        html += `<tr>
+                            <td>Epic ${wt.epic}</td>
+                            <td><code style="font-size:0.85em">${wt.path}</code></td>
+                            <td><button class="secondary" style="padding:0.2rem 0.6rem;font-size:0.85em" onclick="removeWorktree(${wt.epic})">Remove</button></td>
+                        </tr>`;
+                    });
+                    html += '</tbody></table>';
+                    container.innerHTML = html;
+                })
+                .catch(() => {
+                    document.getElementById('worktree-list').innerHTML =
+                        '<p style="color:#d9534f">Failed to load worktrees.</p>';
+                });
+        }
+
+        function removeWorktree(epicNum) {
+            if (!confirm(`Remove worktree for Epic ${epicNum}? This will delete the worktree directory and its branch.`)) return;
+            fetch(`/api/v1/worktrees/${epicNum}`, { method: 'DELETE' })
+                .then(r => {
+                    if (!r.ok) return r.json().then(d => { throw new Error(d.detail || 'Failed'); });
+                    return r.json();
+                })
+                .then(() => loadWorktrees())
+                .catch(err => alert('Failed to remove worktree: ' + err.message));
+        }
+
+        function cleanupAllWorktrees() {
+            if (!confirm('Remove ALL worktrees? This cannot be undone.')) return;
+            fetch('/api/v1/worktrees', { method: 'DELETE' })
+                .then(r => {
+                    if (!r.ok) return r.json().then(d => { throw new Error(d.detail || 'Failed'); });
+                    return r.json();
+                })
+                .then(() => loadWorktrees())
+                .catch(err => alert('Failed to cleanup worktrees: ' + err.message));
+        }
 
         // ---------------------------------------------------------------
         // History loading with failure pattern detection
@@ -1064,6 +1196,18 @@
         let depGraphData = null;
         let depGraphRunActive = false;
 
+        function preselectUncompletedEpics() {
+            if (!depGraphData) return;
+            const doneEpics = new Set(
+                depGraphData.nodes.filter(n => n.status === 'done').map(n => n.id)
+            );
+            const sel = document.getElementById('cfg-epic');
+            if (!sel) return;
+            Array.from(sel.options).forEach(opt => {
+                opt.selected = !doneEpics.has(parseInt(opt.value));
+            });
+        }
+
         function parseEpicFilter(input) {
             if (!input.trim()) return null;
             const nums = new Set();
@@ -1079,42 +1223,56 @@
             return nums.size > 0 ? nums : null;
         }
 
-        function applyDepGraphFilters() {
-            if (!depGraphData) return;
+        function applyDashboardFilters() {
             const showDone = document.getElementById('dep-show-done').checked;
             const epicFilter = parseEpicFilter(document.getElementById('dep-epic-filter').value);
 
-            const filteredNodes = depGraphData.nodes.filter(n => {
-                if (!showDone && n.status === 'done') return false;
-                if (epicFilter && !epicFilter.has(n.id)) return false;
-                return true;
-            });
-            const visibleIds = new Set(filteredNodes.map(n => n.id));
+            // Filter dependency graph
+            if (depGraphData) {
+                const filteredNodes = depGraphData.nodes.filter(n => {
+                    if (!showDone && n.status === 'done') return false;
+                    if (epicFilter && !epicFilter.has(n.id)) return false;
+                    return true;
+                });
+                const visibleIds = new Set(filteredNodes.map(n => n.id));
 
-            const filteredEdges = (depGraphData.edges || []).filter(e =>
-                visibleIds.has(e.from) && visibleIds.has(e.to));
-            const filteredTiers = (depGraphData.tiers || [])
-                .map(tier => tier.filter(id => visibleIds.has(id)))
-                .filter(tier => tier.length > 0);
-            const filteredChains = (depGraphData.chains || [])
-                .map(chain => chain.filter(id => visibleIds.has(id)))
-                .filter(chain => chain.length > 1);
-            const filteredCritPath = (depGraphData.critical_path || [])
-                .filter(id => visibleIds.has(id));
+                const filteredEdges = (depGraphData.edges || []).filter(e =>
+                    visibleIds.has(e.from) && visibleIds.has(e.to));
+                const filteredTiers = (depGraphData.tiers || [])
+                    .map(tier => tier.filter(id => visibleIds.has(id)))
+                    .filter(tier => tier.length > 0);
+                const filteredChains = (depGraphData.chains || [])
+                    .map(chain => chain.filter(id => visibleIds.has(id)))
+                    .filter(chain => chain.length > 1);
+                const filteredCritPath = (depGraphData.critical_path || [])
+                    .filter(id => visibleIds.has(id));
 
-            renderDepGraph({
-                nodes: filteredNodes,
-                edges: filteredEdges,
-                tiers: filteredTiers,
-                chains: filteredChains,
-                critical_path: filteredCritPath,
-            });
+                renderDepGraph({
+                    nodes: filteredNodes,
+                    edges: filteredEdges,
+                    tiers: filteredTiers,
+                    chains: filteredChains,
+                    critical_path: filteredCritPath,
+                });
+            }
+
+            // Filter sprint board
+            if (boardData) {
+                // Build set of done epic IDs from dep graph data
+                const doneEpics = new Set();
+                if (!showDone && depGraphData) {
+                    depGraphData.nodes.forEach(n => {
+                        if (n.status === 'done') doneEpics.add(n.id);
+                    });
+                }
+                populateBoard(boardData, epicFilter, doneEpics);
+            }
         }
 
-        function clearDepGraphFilters() {
+        function clearDashboardFilters() {
             document.getElementById('dep-epic-filter').value = '';
             document.getElementById('dep-show-done').checked = depGraphRunActive;
-            applyDepGraphFilters();
+            applyDashboardFilters();
         }
 
         const STATUS_COLORS = {
