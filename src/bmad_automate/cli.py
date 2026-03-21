@@ -99,16 +99,17 @@ app = typer.Typer(
 
 def signal_handler(signum: int, frame: object) -> None:  # noqa: ARG001
     """Handle interrupt signals (Ctrl+C, SIGTERM) gracefully."""
+    from bmad_automate.git import terminate_all_active
+    terminate_all_active()
+    from bmad_automate.context import get_active_context
+    ctx = get_active_context()
+    if ctx is not None:
+        ctx.retry_registry.skip_all()  # wake any sleeping retry loops
     ctrl = get_active_control()
     if ctrl is not None:
         ctrl.abort()
-    else:
-        # Fallback for legacy code paths
-        from bmad_automate.context import get_active_context
-
-        ctx = get_active_context()
-        if ctx is not None:
-            ctx.interrupted = True
+    elif ctx is not None:
+        ctx.interrupted = True
     console.print(
         "\n[yellow]Interrupt received. Finishing current operation...[/yellow]"
     )
@@ -188,7 +189,7 @@ def _show_dependency_graph(
             yaml_text = f.read()
         yaml_data = yaml.safe_load(yaml_text) or {}
 
-    dag = build_dag(yaml_data, yaml_text, epic_nums)
+    dag = build_dag(yaml_data, yaml_text, epic_nums, config.sprint_status)
     print_dependency_graph(dag, story_counts=story_counts)
 
 

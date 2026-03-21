@@ -27,6 +27,63 @@ from bmad_automate.ui import (
 )
 
 # ---------------------------------------------------------------------------
+# Global subprocess registry — lets the server terminate AI processes on shutdown
+# ---------------------------------------------------------------------------
+
+import threading as _threading
+
+_active_procs: list["subprocess.Popen[str]"] = []
+_active_procs_lock = _threading.Lock()
+
+
+def _register_proc(proc: "subprocess.Popen[str]") -> None:
+    with _active_procs_lock:
+        _active_procs.append(proc)
+
+
+def _unregister_proc(proc: "subprocess.Popen[str]") -> None:
+    with _active_procs_lock:
+        try:
+            _active_procs.remove(proc)
+        except ValueError:
+            pass
+
+
+def _kill_proc_tree(proc: "subprocess.Popen[str]") -> None:
+    """Kill a process and all its children (handles shell=True on Windows)."""
+    import os
+    import sys
+
+    pid = proc.pid
+    if sys.platform == "win32":
+        # On Windows, terminate() only kills cmd.exe, not its children.
+        # taskkill /F /T kills the entire process tree.
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+        )
+    else:
+        # On Unix, kill the entire process group.
+        try:
+            pgid = os.getpgid(pid)
+            import signal as _signal
+            os.killpg(pgid, _signal.SIGTERM)
+        except Exception:
+            proc.terminate()
+
+
+def terminate_all_active() -> None:
+    """Terminate all subprocesses currently tracked by run_step."""
+    with _active_procs_lock:
+        procs = list(_active_procs)
+    for proc in procs:
+        try:
+            _kill_proc_tree(proc)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Low-level subprocess helper (eliminates repeated boilerplate)
 # ---------------------------------------------------------------------------
 
@@ -42,6 +99,7 @@ def run_git_command(
     This is a thin wrapper that handles encoding, timeout, and logging so
     callers don't repeat the same pattern.
     """
+    actual_cwd = cwd if cwd is not None else str(config.project_root)
     result = subprocess.run(
         cmd,
         shell=True,
@@ -50,7 +108,7 @@ def run_git_command(
         timeout=timeout,
         encoding="utf-8",
         errors="replace",
-        cwd=cwd,
+        cwd=actual_cwd,
     )
     if result.stdout:
         log_to_file(f"{label} STDOUT:\n{result.stdout}", config)
@@ -64,9 +122,13 @@ def run_git_command(
 # ---------------------------------------------------------------------------
 
 def _extract_epic_num(story_key: str) -> int:
-    """Extract epic number from a story key like '3-1-feature'."""
+    """Extract epic number from a story key like '3-1-feature' or 'epic-3'."""
     try:
-        return int(story_key.split("-")[0])
+        parts = story_key.split("-")
+        # Handle 'epic-N' format used by after-epic steps
+        if parts[0] == "epic" and len(parts) > 1:
+            return int(parts[1])
+        return int(parts[0])
     except (ValueError, IndexError):
         return 0
 
@@ -125,14 +187,44 @@ def run_step(
                     f"{attempt_str}..."
                 )
 
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 shell=True,
-                capture_output=not config.verbose,
+                stdout=None if config.verbose else subprocess.PIPE,
+                stderr=None if config.verbose else subprocess.PIPE,
                 text=True,
-                timeout=config.timeout,
                 encoding="utf-8",
                 errors="replace",
+                cwd=str(config.project_root),
+            )
+            _register_proc(proc)
+            try:
+                deadline = time.time() + (config.timeout or 7200)
+                while True:
+                    if ctx.interrupted:
+                        _kill_proc_tree(proc)
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                        stdout, stderr = "", ""
+                        break
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        proc.kill()
+                        proc.communicate()
+                        raise subprocess.TimeoutExpired(command, config.timeout)
+                    try:
+                        stdout, stderr = proc.communicate(timeout=min(2.0, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                _unregister_proc(proc)
+            result = subprocess.CompletedProcess(
+                proc.args, proc.returncode,
+                stdout or "", stderr or "",
             )
 
             set_running_title()
@@ -187,7 +279,7 @@ def run_step(
             error = stderr or f"Exit code: {result.returncode}"
             log_to_file(f"FAILED: {step_name} - {error}", config)
 
-            if attempt < config.retries:
+            if attempt < config.retries and not ctx.interrupted:
                 # Create or reuse retry controller for coordinated backoff
                 if retry_ctrl is None:
                     retry_ctrl = RetryController(
@@ -212,7 +304,7 @@ def run_step(
                     )
 
                 action = retry_ctrl.wait_backoff()
-                if action == "skip":
+                if action == "skip" or ctx.interrupted:
                     registry.unregister(retry_ctrl.key)
                     bus.emit(PipelineEvent(
                         epic=epic_num, story=story_key, step=step_name,

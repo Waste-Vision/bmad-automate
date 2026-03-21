@@ -36,31 +36,50 @@ class WorktreeManager:
         branch_name = f"auto/epic-{epic_num}"
 
         if wt_path.exists():
-            # Validate existing worktree: check branch and clean status
+            # Validate existing worktree: reuse if on the correct branch
+            # (even if dirty — uncommitted changes are in-progress work worth keeping)
             try:
                 branch_check = subprocess.run(
                     ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                     cwd=str(wt_path), capture_output=True, text=True,
                 )
-                status_check = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(wt_path), capture_output=True, text=True,
-                )
-                on_correct_branch = branch_check.stdout.strip() == branch_name
-                is_clean = not (status_check.stdout or "").strip()
-
-                if on_correct_branch and is_clean:
+                if branch_check.stdout.strip() == branch_name:
                     return wt_path
 
-                # Stale or dirty worktree — remove and recreate
+                # Wrong branch — stale worktree, remove and recreate
                 self.remove(epic_num)
             except Exception:
                 self.remove(epic_num)
 
         self._worktree_base.mkdir(parents=True, exist_ok=True)
 
+        # Prune stale worktree registrations (directories deleted but git still
+        # tracks them) so that a subsequent `git worktree add` doesn't fail
+        # with exit code 128.
         subprocess.run(
-            ["git", "worktree", "add", str(wt_path), "-b", branch_name],
+            ["git", "worktree", "prune"],
+            cwd=str(self._root),
+            capture_output=True,
+            text=True,
+        )
+
+        # If the branch already exists (orphaned from a previous run where the
+        # worktree directory was deleted but the branch wasn't cleaned up),
+        # use --force and check-out the existing branch instead of -b (create).
+        branch_exists = subprocess.run(
+            ["git", "rev-parse", "--verify", branch_name],
+            cwd=str(self._root),
+            capture_output=True,
+            text=True,
+        ).returncode == 0
+
+        if branch_exists:
+            cmd = ["git", "worktree", "add", str(wt_path), branch_name]
+        else:
+            cmd = ["git", "worktree", "add", str(wt_path), "-b", branch_name]
+
+        subprocess.run(
+            cmd,
             cwd=str(self._root),
             capture_output=True,
             text=True,
@@ -81,6 +100,15 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
             )
+
+        # Prune any stale registrations (handles the case where the directory
+        # was deleted externally but git still has the worktree registered).
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=str(self._root),
+            capture_output=True,
+            text=True,
+        )
 
         # Clean up the branch
         subprocess.run(

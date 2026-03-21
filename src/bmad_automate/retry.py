@@ -191,6 +191,13 @@ class RetryRegistry:
             return True
         return False
 
+    def skip_all(self) -> None:
+        """Skip all active retry controllers — used on abort to wake sleeping loops."""
+        with self._lock:
+            ctrls = list(self._controllers.values())
+        for ctrl in ctrls:
+            ctrl.skip()
+
     def to_dict(self) -> list[dict]:
         """Serializable snapshot of all active retries."""
         return [c.to_dict() for c in self.get_all()]

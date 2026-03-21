@@ -101,6 +101,22 @@ def process_story(
     skip_create = config.skip_create
     skip_dev = config.skip_dev
 
+    if story_status == "done":
+        # Already fully completed (e.g. from a previous run's worktree).
+        bus.emit(PipelineEvent(
+            epic=epic_num, story=story_key, step=None,
+            kind=STORY_DONE,
+            payload={"status": StoryStatus.SKIPPED.value, "duration": 0.0},
+        ))
+        bus.drain()
+        log_to_file(f"=== Story {story_key}: skipped (already done) ===", config)
+        return StoryResult(
+            key=story_key,
+            status=StoryStatus.SKIPPED,
+            steps=[],
+            duration=0.0,
+        )
+
     if story_status == "review":
         bus.emit(PipelineEvent(
             epic=epic_num, story=story_key, step="create-story",

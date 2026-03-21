@@ -166,7 +166,7 @@
                     <div class="form-row" style="margin-top:0.5rem">
                         <label>
                             Epic(s)
-                            <select id="cfg-epic" multiple size="3" style="font-size:0.9em">
+                            <select id="cfg-epic" multiple size="6" style="font-size:0.9em">
                                 <!-- populated dynamically -->
                             </select>
                             <small>Hold Ctrl to select multiple. Leave empty for all.</small>
@@ -225,14 +225,14 @@
                         </label>
                         <label>
                             Parallel Epics
-                            <input type="number" id="cfg-parallel" min="1" max="10" value="1">
+                            <input type="number" id="cfg-parallel" min="1" max="20" value="5">
                             <small>1 = sequential, >1 = worktrees</small>
                         </label>
                     </div>
                     <div class="form-row" style="margin-top:0.5rem">
                         <label>
                             Retries per step
-                            <input type="number" id="cfg-retries" min="1" max="10" value="1">
+                            <input type="number" id="cfg-retries" min="0" max="10" value="2">
                         </label>
                         <label>
                             Timeout per step (seconds)
@@ -412,11 +412,11 @@
         function sendBrowserNotification(title, body) {
             if (!notificationsEnabled) return;
             if (Notification.permission === 'granted') {
-                new Notification(title, { body, icon: null });
+                new Notification(title, { body });
             } else if (Notification.permission === 'default') {
                 Notification.requestPermission().then(perm => {
                     if (perm === 'granted') {
-                        new Notification(title, { body, icon: null });
+                        new Notification(title, { body });
                     }
                 });
             }
@@ -596,8 +596,8 @@
                 start_from: document.getElementById('cfg-start-from').value || '',
                 skip_steps: skipSteps,
                 ai_provider: document.getElementById('cfg-ai-provider').value,
-                parallel_epics: parseInt(document.getElementById('cfg-parallel').value) || 1,
-                retries: parseInt(document.getElementById('cfg-retries').value) || 1,
+                parallel_epics: parseInt(document.getElementById('cfg-parallel').value) || 5,
+                retries: parseInt(document.getElementById('cfg-retries').value) || 2,
                 timeout: parseInt(document.getElementById('cfg-timeout').value) || 3600,
                 dry_run: dryRun,
             };
@@ -626,8 +626,8 @@
                 start_from: '',
                 skip_steps: [],
                 ai_provider: 'claude',
-                parallel_epics: 1,
-                retries: 1,
+                parallel_epics: 5,
+                retries: 2,
                 timeout: 3600,
                 dry_run: false,
             };
@@ -717,7 +717,7 @@
             const body = {
                 after_epic: selectedEpics,
                 ai_provider: document.getElementById('ae-ai-provider').value,
-                retries: parseInt(document.getElementById('ae-retries').value) || 1,
+                retries: parseInt(document.getElementById('ae-retries').value) || 2,
                 timeout: parseInt(document.getElementById('ae-timeout').value) || 3600,
                 dry_run: dryRun,
                 skip_retro: !document.getElementById('ae-retro').checked,
@@ -738,7 +738,7 @@
             .then(data => {
                 // Switch to run tab to show logs
                 showTab('run');
-                showActiveRun(data.run_id, data.epics ? data.epics.map(e => `after-epic-${e}`) : []);
+                showActiveRun(data.run_id, data.epics ? data.epics.map(e => `epic-${e}`) : []);
             })
             .catch(err => {
                 errEl.textContent = err.message;
@@ -858,12 +858,17 @@
                 else if (data.level === 'warning') line.style.color = '#ffb74d';
                 else if (data.level === 'success') line.style.color = '#4caf50';
 
+                // Timestamp prefix
+                const ts = data.timestamp
+                    ? new Date(data.timestamp * 1000).toLocaleTimeString([], {hour12: false})
+                    : '';
+
                 // Prefix with epic/story context if available
-                let prefix = '';
+                let prefix = ts ? `[${ts}] ` : '';
                 if (data.epic) prefix += `[E${data.epic}]`;
                 if (data.story) prefix += `[${data.story}]`;
                 if (data.step) prefix += `[${data.step}]`;
-                if (prefix) prefix += ' ';
+                if (data.epic || data.story || data.step) prefix += ' ';
 
                 line.textContent = prefix + data.line;
                 logPanel.appendChild(line);
@@ -902,6 +907,10 @@
             });
 
             eventSource.addEventListener('done', function(e) {
+                // Close the stream to prevent auto-reconnect replaying this event
+                eventSource.close();
+                eventSource = null;
+
                 const line = document.createElement('p');
                 line.className = 'log-line';
                 line.style.color = '#5cb85c';
@@ -1013,7 +1022,7 @@
                 document.getElementById('dep-show-done').checked = depGraphRunActive;
                 if (depGraphRunActive) {
                     showTab('run');
-                    showActiveRun(data.run_id, []);
+                    showActiveRun(data.run_id, data.stories || []);
                 }
             })
             .catch(() => {})
@@ -1301,15 +1310,59 @@
             const critNodes = new Set(critical_path || []);
 
             // Layout constants
-            const nodeW = 140, nodeH = 56, padX = 60, padY = 70, topPad = 30;
+            const nodeW = 140, nodeH = 56, padX = 60, padY = 86, topPad = 30;
 
-            // Compute positions: x by position within tier, y by tier depth
-            const maxTierSize = Math.max(...tiers.map(t => t.length));
+            // --- Crossing minimization via barycenter sweeps (Sugiyama-style) ---
+            // Work on mutable copies so we don't mutate the data object.
+            const orderedTiers = tiers.map(t => [...t]);
+
+            // Build parent/child adjacency for visible nodes only.
+            const parentsOf = {}, childrenOf = {};
+            nodes.forEach(n => { parentsOf[n.id] = []; childrenOf[n.id] = []; });
+            edges.forEach(e => {
+                if (parentsOf[e.to]  !== undefined) parentsOf[e.to].push(e.from);
+                if (childrenOf[e.from] !== undefined) childrenOf[e.from].push(e.to);
+            });
+
+            // Column index within its tier — used as the barycenter coordinate.
+            const colIdx = {};
+            orderedTiers.forEach((tier, d) => tier.forEach((id, i) => { colIdx[id] = i; }));
+
+            // 4 alternating passes: top-down then bottom-up.
+            for (let pass = 0; pass < 4; pass++) {
+                // Top-down: sort each tier by avg parent column.
+                for (let d = 1; d < orderedTiers.length; d++) {
+                    const tier = orderedTiers[d];
+                    const scores = tier.map(id => {
+                        const ps = parentsOf[id];
+                        return ps.length ? ps.reduce((s, p) => s + (colIdx[p] ?? 0), 0) / ps.length : colIdx[id];
+                    });
+                    orderedTiers[d] = tier.map((id, i) => [id, scores[i]])
+                                         .sort((a, b) => a[1] - b[1])
+                                         .map(x => x[0]);
+                    orderedTiers[d].forEach((id, i) => { colIdx[id] = i; });
+                }
+                // Bottom-up: sort each tier by avg child column.
+                for (let d = orderedTiers.length - 2; d >= 0; d--) {
+                    const tier = orderedTiers[d];
+                    const scores = tier.map(id => {
+                        const cs = childrenOf[id];
+                        return cs.length ? cs.reduce((s, c) => s + (colIdx[c] ?? 0), 0) / cs.length : colIdx[id];
+                    });
+                    orderedTiers[d] = tier.map((id, i) => [id, scores[i]])
+                                         .sort((a, b) => a[1] - b[1])
+                                         .map(x => x[0]);
+                    orderedTiers[d].forEach((id, i) => { colIdx[id] = i; });
+                }
+            }
+
+            // Assign pixel positions from the crossing-minimized order.
+            const maxTierSize = Math.max(...orderedTiers.map(t => t.length));
             const svgW = Math.max(maxTierSize * (nodeW + padX) + padX, 400);
-            const svgH = tiers.length * (nodeH + padY) + topPad + 40;
+            const svgH = orderedTiers.length * (nodeH + padY) + topPad + 40;
 
             const pos = {};  // epicId -> {x, y}
-            tiers.forEach((tier, depth) => {
+            orderedTiers.forEach((tier, depth) => {
                 const tierW = tier.length * (nodeW + padX) - padX;
                 const startX = (svgW - tierW) / 2;
                 tier.forEach((epicId, i) => {
@@ -1377,7 +1430,7 @@
             });
 
             // Tier labels on the left
-            tiers.forEach((tier, depth) => {
+            orderedTiers.forEach((tier, depth) => {
                 const y = topPad + depth * (nodeH + padY) + nodeH / 2 + 4;
                 svg += `<text x="4" y="${y}" fill="#666" font-size="10">Tier ${depth}</text>`;
             });

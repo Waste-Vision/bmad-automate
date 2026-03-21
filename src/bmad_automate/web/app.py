@@ -90,9 +90,15 @@ def _make_event_to_log_bridge(log_broker: LogBroker):
                 f"Story {story} {status}",
                 level="success" if status == "completed" else "error",
             )
-        elif kind in ("log_line", "log_message"):
+        elif kind == "log_line":
+            content = event.payload.get("content", "")
+            stream = event.payload.get("stream", "")
+            if content:
+                prefix = f"{stream}: " if stream else ""
+                _write(f"{prefix}{content}")
+        elif kind == "log_message":
             _write(
-                event.payload.get("line", str(event.payload)),
+                event.payload.get("message", str(event.payload)),
                 level=event.payload.get("level", "info"),
             )
 
@@ -148,7 +154,7 @@ class RunRequest(BaseModel):
     project_dir: str = "."
     epic: list[int] = []
     limit: int = 0
-    parallel_epics: int = 1
+    parallel_epics: int = 5
     skip_steps: list[str] = []
     only_steps: list[str] | None = None
     ai_provider: str = "claude"
@@ -193,6 +199,8 @@ class RunManager:
         self._error: str | None = None
         self._rate_limiter = None  # set during run for concurrency control
         self._merge_queue = None   # set during run for merge queue visibility
+        self._config: Config | None = None  # retained for shutdown history writes
+        self._history_written: bool = False  # guard against double-write
 
     @property
     def state(self) -> str:
@@ -224,6 +232,8 @@ class RunManager:
         self._state = "running"
         self._stories_processed = []
         self._error = None
+        self._config = config
+        self._history_written = False
 
         # Build run context
         ctx = RunContext(
@@ -278,9 +288,13 @@ class RunManager:
         self.run_thread.start()
         return run_id
 
-    def _write_history(self, config: Config) -> None:
-        """Append a run summary to runs.json."""
-        if self.ctx is None:
+    def _write_history(self, config: Config | None = None) -> None:
+        """Append a run summary to runs.json (at most once per run)."""
+        if self._history_written:
+            return
+        self._history_written = True
+        cfg = config or self._config
+        if self.ctx is None or cfg is None or self.run_id is None:
             return
         duration = time.time() - self.ctx.start_time if self.ctx.start_time else 0
 
@@ -306,14 +320,29 @@ class RunManager:
                 1 for r in self.ctx.results
                 if r.status == StoryStatus.FAILED
             ),
+            "stories_interrupted": max(
+                0,
+                len(self._stories_processed) - len(self.ctx.results),
+            ),
             "failures": failures,
         }
-        history_file = config.project_root / "runs.json"
+        history_file = cfg.project_root / "runs.json"
         try:
             with open(history_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             pass
+
+    def abort_and_record(self) -> None:
+        """Abort any active run and write a history entry immediately."""
+        from bmad_automate.git import terminate_all_active
+        terminate_all_active()
+        if self.ctx is not None:
+            self.ctx.retry_registry.skip_all()  # wake any sleeping retry loops
+            self.ctx.run_control.abort()
+        if self.is_running:
+            self._state = "finished"
+        self._write_history()
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +377,16 @@ def create_app(
     _history_file = _project_dir / "runs.json"
 
     # ------------------------------------------------------------------
+    # Lifecycle: write history and abort any active run on server shutdown
+    # ------------------------------------------------------------------
+
+    @app.on_event("shutdown")
+    async def _on_shutdown() -> None:
+        from bmad_automate.git import terminate_all_active
+        terminate_all_active()
+        _run_manager.abort_and_record()
+
+    # ------------------------------------------------------------------
     # API routes
     # ------------------------------------------------------------------
 
@@ -360,6 +399,7 @@ def create_app(
             "project_dir": str(_project_dir),
         }
         if _run_manager.ctx is not None:
+            result["stories"] = _run_manager._stories_processed
             result["stories_total"] = len(_run_manager._stories_processed)
             result["stories_completed"] = sum(
                 1 for r in _run_manager.ctx.results
@@ -480,8 +520,7 @@ def create_app(
         action = request.action
 
         if action == "abort":
-            ctrl.abort()
-            _run_manager._state = "finished"
+            _run_manager.abort_and_record()
             return ControlResponse(accepted=True)
 
         if action == "pause_after_step" and request.epic is not None:
@@ -553,8 +592,31 @@ def create_app(
 
         with open(ss_path, encoding="utf-8") as f:
             yaml_text = f.read()
-        yaml_data = yaml.safe_load(yaml_text) or {}
-        dev_status = yaml_data.get("development_status", {})
+        try:
+            yaml_data = yaml.safe_load(yaml_text) or {}
+        except yaml.YAMLError:
+            raise HTTPException(422, "sprint-status.yaml has parse errors (merge conflicts?)")
+        dev_status: dict[str, str] = dict(yaml_data.get("development_status", {}))
+
+        # Merge worktree statuses so the graph reflects live progress.
+        _status_order = {"backlog": 0, "ready-for-dev": 1, "in-progress": 2,
+                         "review": 3, "done": 4}
+        wt_base = _project_dir / ".bmad-worktrees"
+        if wt_base.exists():
+            rel_ss = Path("_bmad-output") / "implementation-artifacts" / "sprint-status.yaml"
+            for wt_dir in sorted(wt_base.iterdir()):
+                wt_ss = wt_dir / rel_ss
+                if not wt_ss.exists():
+                    continue
+                try:
+                    with open(wt_ss, encoding="utf-8") as f:
+                        wt_data = yaml.safe_load(f) or {}
+                    for key, wt_st in wt_data.get("development_status", {}).items():
+                        cur = dev_status.get(key, "backlog")
+                        if _status_order.get(wt_st, -1) > _status_order.get(cur, -1):
+                            dev_status[key] = wt_st
+                except Exception:
+                    continue
 
         # Extract epic numbers from story keys
         epic_nums = sorted({
@@ -565,7 +627,7 @@ def create_app(
         if not epic_nums:
             return {"nodes": [], "edges": [], "tiers": []}
 
-        dag = build_dag(yaml_data, yaml_text, epic_nums)
+        dag = build_dag(yaml_data, yaml_text, epic_nums, ss_path)
         result = dag.to_dict()
 
         # Enrich nodes with story counts and status summary
@@ -624,8 +686,32 @@ def create_app(
             return {"stories": {}, "epics": []}
 
         with open(ss_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        dev_status = data.get("development_status", {})
+            try:
+                data = yaml.safe_load(f) or {}
+            except yaml.YAMLError:
+                raise HTTPException(422, "sprint-status.yaml has parse errors (merge conflicts?)")
+        dev_status: dict[str, str] = dict(data.get("development_status", {}))
+
+        # Merge in statuses from active worktrees — they have the live progress
+        # that hasn't been committed back to the main branch yet.
+        _status_order = {"backlog": 0, "ready-for-dev": 1, "in-progress": 2,
+                         "review": 3, "done": 4}
+        wt_base = _project_dir / ".bmad-worktrees"
+        if wt_base.exists():
+            rel_ss = Path("_bmad-output") / "implementation-artifacts" / "sprint-status.yaml"
+            for wt_dir in sorted(wt_base.iterdir()):
+                wt_ss = wt_dir / rel_ss
+                if not wt_ss.exists():
+                    continue
+                try:
+                    with open(wt_ss, encoding="utf-8") as f:
+                        wt_data = yaml.safe_load(f) or {}
+                    for key, wt_st in wt_data.get("development_status", {}).items():
+                        cur = dev_status.get(key, "backlog")
+                        if _status_order.get(wt_st, -1) > _status_order.get(cur, -1):
+                            dev_status[key] = wt_st
+                except Exception:
+                    continue
 
         stories_by_status: dict[str, list[str]] = {}
         epic_set: set[int] = set()
@@ -693,17 +779,70 @@ def create_app(
         _run_manager.run_id = run_id
         _run_manager.ctx = ctx
         _run_manager._state = "running"
-        _run_manager._stories_processed = [f"after-epic-{e}" for e in request.after_epic]
+        _run_manager._stories_processed = [f"epic-{e}" for e in request.after_epic]
         _run_manager._error = None
 
         def _run_after_epic() -> None:
+            import copy
+
+            from bmad_automate.merge_queue import MergeQueue
+
             try:
                 ctx.start_time = time.time()
                 retro_results: list = []
+                worktree_epics: list[int] = []
+
                 for epic_num in request.after_epic:
                     if ctrl.should_stop(epic_num):
                         break
-                    run_after_epic_pipeline(epic_num, config, ctx, retro_results)
+
+                    # Run inside the worktree if one exists for this epic
+                    wt_path = _worktree_mgr.get_worktree_path(epic_num)
+                    if wt_path.exists():
+                        epic_config = copy.copy(config)
+                        try:
+                            epic_config.sprint_status = (
+                                wt_path / config.sprint_status.relative_to(config.project_root)
+                            )
+                            epic_config.story_dir = (
+                                wt_path / config.story_dir.relative_to(config.project_root)
+                            )
+                            epic_config.bmad_dir = (
+                                wt_path / config.bmad_dir.relative_to(config.project_root)
+                            )
+                        except ValueError:
+                            pass  # paths already absolute and not relative to project_root
+                        epic_config.project_root = wt_path
+                        epic_config.in_worktree = True
+                        worktree_epics.append(epic_num)
+                    else:
+                        epic_config = config
+
+                    run_after_epic_pipeline(epic_num, epic_config, ctx, retro_results)
+
+                # Merge worktrees back to main after all epics complete
+                if worktree_epics and not ctx.interrupted and not config.dry_run:
+                    mq = MergeQueue(project_root=config.project_root, config=config, ctx=ctx)
+                    _run_manager._merge_queue = mq
+                    for epic_num in worktree_epics:
+                        wt_path = _worktree_mgr.get_worktree_path(epic_num)
+                        mq.enqueue(epic_num, wt_path)
+                    merge_results = mq.process_all()
+                    # Push to remote after all merges succeed
+                    if not ctx.interrupted and all(r.success for r in merge_results):
+                        import subprocess as _sp
+                        _sp.run(
+                            ["git", "push"],
+                            cwd=str(config.project_root),
+                            capture_output=True,
+                        )
+                        # Clean up merged worktrees
+                        for epic_num in worktree_epics:
+                            try:
+                                _worktree_mgr.remove(epic_num)
+                            except Exception:
+                                pass
+
             except Exception:
                 _run_manager._error = traceback.format_exc()
             finally:

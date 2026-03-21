@@ -13,7 +13,7 @@ STORY_PATTERN = re.compile(r"^\d+-\d+-.+$")
 DEFAULT_SPRINT_STATUS = "_bmad-output/implementation-artifacts/sprint-status.yaml"
 DEFAULT_STORY_DIR = "_bmad-output/implementation-artifacts"
 DEFAULT_LOG_FILE = "bmad-automation.log"
-DEFAULT_RETRIES = 1
+DEFAULT_RETRIES = 2
 DEFAULT_TIMEOUT = 3600  # 60 minutes
 DEFAULT_BMAD_DIR = "_bmad"
 
@@ -122,7 +122,7 @@ class Config:
     project_root: Path = field(default_factory=Path.cwd)
 
     # Parallelisation
-    parallel_epics: int = 1  # 1 = sequential (default)
+    parallel_epics: int = 5
 
     # Worktree mode (set automatically when running inside a worktree)
     in_worktree: bool = False

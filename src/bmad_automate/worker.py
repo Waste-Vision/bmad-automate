@@ -8,7 +8,8 @@ from pathlib import Path
 from bmad_automate.context import RunContext
 from bmad_automate.events import EPIC_DONE, EPIC_START, PipelineEvent
 from bmad_automate.models import Config, StoryResult, StoryStatus
-from bmad_automate.pipeline import process_story
+from bmad_automate.pipeline import process_story, run_after_epic_pipeline
+from bmad_automate.stories import get_epics_needing_retro
 
 
 class EpicWorker:
@@ -28,21 +29,31 @@ class EpicWorker:
         config: Config,
         ctx: RunContext,
         worktree_path: Path | None = None,
+        run_after_epic: bool = False,
     ) -> None:
         self.epic_num = epic_num
         self.stories = stories
         self.story_status_map = story_status_map
         self.ctx = ctx
         self.worktree_path = worktree_path
+        self.run_after_epic = run_after_epic
         self.results: list[StoryResult] = []
 
         # Create a worktree-scoped config if running in a worktree
         if worktree_path is not None:
             self.config = copy.copy(config)
-            # Re-scope relative paths to the worktree directory
-            self.config.sprint_status = worktree_path / config.sprint_status
-            self.config.story_dir = worktree_path / config.story_dir
-            self.config.bmad_dir = worktree_path / config.bmad_dir
+            # Re-scope paths to the worktree — absolute paths must be made
+            # relative to project_root first, otherwise Path('/a') / Path('/b')
+            # returns Path('/b') (absolute path wins in pathlib).
+            def _rescope(p: Path) -> Path:
+                try:
+                    return worktree_path / p.relative_to(config.project_root)
+                except ValueError:
+                    return worktree_path / p  # already relative
+
+            self.config.sprint_status = _rescope(config.sprint_status)
+            self.config.story_dir = _rescope(config.story_dir)
+            self.config.bmad_dir = _rescope(config.bmad_dir)
             self.config.project_root = worktree_path
             self.config.in_worktree = True
         else:
@@ -81,6 +92,16 @@ class EpicWorker:
 
             if result.status == StoryStatus.FAILED:
                 break
+
+        # Run after-epic pipeline if requested and all stories succeeded
+        if (
+            self.run_after_epic
+            and not self.ctx.run_control.should_stop(self.epic_num)
+            and not any(r.status == StoryStatus.FAILED for r in self.results)
+            and self.epic_num in get_epics_needing_retro(self.config)
+        ):
+            retro_results: list = []
+            run_after_epic_pipeline(self.epic_num, self.config, self.ctx, retro_results)
 
         bus.emit(PipelineEvent(
             epic=self.epic_num, story=None, step=None,
